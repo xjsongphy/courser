@@ -13,6 +13,7 @@ gws = https://github.com/googleworkspace/cli（npm 包 @googleworkspace/cli，
 from __future__ import annotations
 
 import base64
+import html
 import json
 import shutil
 import subprocess
@@ -45,6 +46,7 @@ def _gws_profile_email(log: Optional[Callable[[str], None]] = None) -> Optional[
 
 
 def send_email(notify: Notify, subject: str, body: str,
+               body_html: Optional[str] = None,
                log: Optional[Callable[[str], None]] = None) -> bool:
     if not notify.to:
         if log:
@@ -62,6 +64,8 @@ def send_email(notify: Notify, subject: str, body: str,
     mime["To"] = notify.to
     mime["Subject"] = subject
     mime.set_content(body)
+    if body_html:
+        mime.add_alternative(body_html, subtype="html")
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("ascii").rstrip("=")
 
     cmd = [_GWS, "gmail", "users", "messages", "send",
@@ -87,26 +91,63 @@ def send_email(notify: Notify, subject: str, body: str,
         return False
 
 
-def build_body(courses: list, ts: str) -> str:
-    lines = [
-        f"补退选时空余名额提醒（{ts}）",
-        "",
-        "以下课程符合你的筛选条件，且当前有空余名额：",
-        "",
-    ]
+def build_body(courses: list, ts: str) -> tuple[str, str]:
+    """返回 (纯文本正文, HTML 正文)。HTML 为表格样式，仿选课网列；
+    明确不含「状态 / 自选P/NP」（P/NP 是否可申请不随邮件发送）。"""
+    return _plain_body(courses, ts), _html_body(courses, ts)
+
+
+def _plain_body(courses: list, ts: str) -> str:
+    lines = [f"补退选时空余名额提醒（{ts}）", "",
+             "以下课程符合你的筛选条件，且当前有空余名额：", ""]
     for c in courses:
         seats = f"{c.selected}/{c.quota}（空余 {c.avail}）" if c.quota is not None else c.seats_raw
         lines.append(f"• {c.name} [{c.course_no}]")
-        lines.append(f"    类别：{c.category}    开课单位：{c.dept}")
-        lines.append(f"    教师：{c.teacher}    限数/已选：{seats}    状态：{c.status or '—'}")
+        lines.append(f"    课程类别：{c.category}    开课单位：{c.dept}")
+        lines.append(f"    教师：{c.teacher}    限数/已选：{seats}")
         if c.schedule:
-            lines.append(f"    时间：{c.schedule}")
+            lines.append(f"    上课/考试信息：{c.schedule}")
         lines.append("")
-    lines.append("请尽快登录选课系统操作：")
-    lines.append("http://elective.pku.edu.cn/elective2008/")
+    lines.append("请尽快登录选课系统操作：http://elective.pku.edu.cn/elective2008/")
     lines.append("")
     lines.append("（本邮件由 courser 自动发送）")
     return "\n".join(lines)
+
+
+def _html_body(courses: list, ts: str) -> str:
+    esc = lambda s: html.escape(s or "", quote=True)
+    rows = []
+    for c in courses:
+        seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
+        avail = str(c.avail) if c.avail >= 0 else "—"
+        tds = [
+            esc(c.course_no), esc(c.name), esc(c.category), esc(c.credits),
+            esc(c.weekly_hours), esc(c.teacher), esc(c.class_no), esc(c.dept),
+            esc(c.grade),
+            f'<td style="max-width:260px;word-break:break-all;">{esc(c.schedule)}</td>',
+            esc(seats),
+            f'<td style="color:#c0392b;font-weight:bold;text-align:center;">{esc(avail)}</td>',
+        ]
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    return (
+        "<html><body style=\"font-family:Helvetica,Arial,'PingFang SC','Microsoft YaHei',sans-serif;"
+        "font-size:14px;color:#222;\">"
+        f"<p>补退选时空余名额提醒（{esc(ts)}）</p>"
+        f"<p>以下 {len(courses)} 门课程符合筛选条件且当前有空余名额：</p>"
+        "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\" "
+        "style=\"border-collapse:collapse;border-color:#ccc;\">"
+        "<thead><tr style=\"background:#eef2f8;\">"
+        "<th>课程号</th><th>课程名</th><th>课程类别</th><th>学分</th><th>周学时</th>"
+        "<th>教师</th><th>班号</th><th>开课单位</th><th>年级</th>"
+        "<th>上课/考试信息</th><th>限数/已选</th><th>空余</th>"
+        "</tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+        "<p>请尽快登录选课系统操作：<a href=\"http://elective.pku.edu.cn/elective2008/\">"
+        "elective.pku.edu.cn</a></p>"
+        "<p style=\"color:#888;font-size:12px;\">（本邮件由 courser 自动发送）</p>"
+        "</body></html>"
+    )
 
 
 def build_subject(courses: list) -> str:

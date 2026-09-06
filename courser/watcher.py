@@ -140,8 +140,10 @@ class Watcher:
                     self._save_state()
                 if r.notified:
                     subject = notifier.build_subject(r.notified)
-                    body = notifier.build_body(r.notified, time.strftime("%Y-%m-%d %H:%M:%S"))
-                    notifier.send_email(self.cfg.notify, subject, body, log=self.log)
+                    text, html_body = notifier.build_body(r.notified,
+                                                          time.strftime("%Y-%m-%d %H:%M:%S"))
+                    notifier.send_email(self.cfg.notify, subject, text,
+                                        body_html=html_body, log=self.log)
             else:
                 self.log(f"命中 {len(r.matched)} 门，暂无空余名额"
                          + ("" if r.matched else "（且当前筛选条件未命中任何课程）"))

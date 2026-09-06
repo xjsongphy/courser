@@ -54,14 +54,15 @@ def main() -> int:
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     subject = notifier.build_subject(seats)
-    body = notifier.build_body(seats, ts)
+    text, html_body = notifier.build_body(seats, ts)
     print("=" * 66)
     print(f"邮件主题：{subject}")
     print("-" * 66)
-    print(body)
+    print(text)
+    print(f"（另附 HTML 表格正文，样式仿选课网，无「状态」列，共 {len(html_body)} 字符）")
     print("=" * 66)
 
-    ok = notifier.send_email(cfg.notify, subject, body,
+    ok = notifier.send_email(cfg.notify, subject, text, body_html=html_body,
                              log=lambda m: print("[notify]", m))
     print("✔ 已触发邮件发送" if ok else "✗ 邮件发送未成功（原因见上方日志）")
     return 0 if ok else 1
