@@ -118,6 +118,9 @@ class HelpScreen(ModalScreen[None]):
     def _close(self, event: Button.Pressed) -> None:
         self.dismiss(None)
 
+    def action_close(self) -> None:
+        self.dismiss(None)
+
 
 # ---------------------------------------------------------------------------
 # 筛选管理（pi 风格：顶部查询输入即输即滤）
