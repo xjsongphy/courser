@@ -1,7 +1,7 @@
 """配置管理。
 
 - config.json：TUI 可编辑的全部配置（轮询间隔、筛选条件、凭据、邮件、浏览器会话）
-- 环境变量（.env）：敏感信息（SMTP 密码等）可选覆盖
+- 环境变量（.env）：敏感信息（密码等）可选覆盖
 所有配置集中在「设置」界面维护，代码里不散落魔法配置。
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "config.json"
+CONFIG_PATH = Path(os.environ.get("COURSER_CONFIG", str(PROJECT_ROOT / "config.json")))
 DATA_DIR = PROJECT_ROOT / "data"
 STATE_FILE = DATA_DIR / "notified.json"
 
@@ -39,28 +39,24 @@ class Credentials:
 
 @dataclass
 class Notify:
-    to: str = "you@example.com"          # 收件人
-    smtp_host: str = "smtp.gmail.com"         # SMTP 服务器
-    smtp_port: int = 465                      # 465=SSL / 587=STARTTLS
-    smtp_user: str = ""                       # 发件账号（一般为 Gmail 地址）
-    smtp_pass: str = ""                       # Gmail 应用专用密码（App Password）
-    min_interval_min: float = 15.0            # 同一课程两次通知的最小间隔（分钟）
+    """邮件通知（通过 gws = Google Workspace CLI 发送，需用户自行安装并 gws auth login）。"""
+
+    to: str = "you@example.com"   # 收件人邮箱（提醒的目标地址）
+    gws_from: str = ""                 # gws 发件账号（Gmail 地址，可选；默认取认证账号）
+    min_interval_min: float = 15.0     # 同一课程两次通知的最小间隔（分钟）
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "Notify":
         d = d or {}
         return cls(
             to=str(d.get("to", "") or _env("MAIL_TO", "you@example.com")),
-            smtp_host=str(d.get("smtp_host", "") or _env("SMTP_HOST", "smtp.gmail.com")),
-            smtp_port=int(d.get("smtp_port", 0) or _env("SMTP_PORT", "465")),
-            smtp_user=str(d.get("smtp_user", "") or _env("SMTP_USER", "")),
-            smtp_pass=str(d.get("smtp_pass", "") or _env("SMTP_PASS", "")),
+            gws_from=str(d.get("gws_from", "") or _env("GWS_FROM", "")),
             min_interval_min=float(d.get("min_interval_min", 15.0)),
         )
 
     @property
     def configured(self) -> bool:
-        return bool(self.to) and bool(self.smtp_user) and bool(self.smtp_pass)
+        return bool(self.to)
 
 
 @dataclass
@@ -112,6 +108,7 @@ class Config:
     session: str = "courser-watch"         # opencli 浏览器会话名
     window: str = "background"             # background=后台窗口，不抢焦点
     force_relogin: bool = True             # 每轮先登出再重新登录
+    first_run_done: bool = False           # 初次启动向导是否已完成
     cli_log: bool = False                  # CLI 模式（无 TUI）
 
     @classmethod
@@ -130,6 +127,7 @@ class Config:
             cfg.session = str(d.get("session", cfg.session))
             cfg.window = str(d.get("window", cfg.window))
             cfg.force_relogin = bool(d.get("force_relogin", cfg.force_relogin))
+            cfg.first_run_done = bool(d.get("first_run_done", cfg.first_run_done))
             cfg.credentials = Credentials.from_dict(d.get("credentials"))
             cfg.filters = Filters.from_dict(d.get("filters"))
             cfg.notify = Notify.from_dict(d.get("notify"))
@@ -145,13 +143,11 @@ class Config:
             "session": self.session,
             "window": self.window,
             "force_relogin": self.force_relogin,
+            "first_run_done": self.first_run_done,
             "credentials": {"username": self.credentials.username,
                             "password": self.credentials.password},
             "filters": self.filters.to_dict(),
-            "notify": {"to": self.notify.to, "smtp_host": self.notify.smtp_host,
-                       "smtp_port": self.notify.smtp_port,
-                       "smtp_user": self.notify.smtp_user,
-                       "smtp_pass": self.notify.smtp_pass,
+            "notify": {"to": self.notify.to, "gws_from": self.notify.gws_from,
                        "min_interval_min": self.notify.min_interval_min},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +159,7 @@ class Config:
 
 
 def load_env_file(path: Optional[Path] = None) -> None:
-    """加载项目根目录 .env（若存在），用于填充 SMTP 等环境变量。"""
+    """加载项目根目录 .env（若存在），用于填充 PKU 凭据、GWS_FROM 等环境变量。"""
     path = path or (PROJECT_ROOT / ".env")
     if not path.exists():
         return

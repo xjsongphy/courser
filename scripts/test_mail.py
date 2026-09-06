@@ -1,8 +1,8 @@
-"""发送一封测试邮件，验证 SMTP 配置。
+"""发送一封测试邮件，验证 gws 邮件配置。
 
 用法：
     uv run python scripts/test_mail.py
-（凭据取自 config.json / .env，或直接运行 courser 后在 TUI「设置 → 发送测试邮件」）
+（收件邮箱取自 config.json / .env，或运行 courser 后在 TUI「设置 → 发送测试邮件」）
 """
 
 from __future__ import annotations

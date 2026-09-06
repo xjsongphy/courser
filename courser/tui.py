@@ -56,6 +56,10 @@ DataTable > .datatable--header { background: #23233a; color: #9adcff; }
                          border: round #44446a; padding: 1 2; }
 #intervalbox { width: 60; height: 9; background: #16161e; border: round #44446a;
                padding: 1 2; align: center middle; }
+#firstrunbox { width: 88; height: 62%; background: #16161e; border: round #44446a;
+               padding: 1 2; }
+#frbtns { height: 4; align: center middle; }
+#frbtns Button { margin: 0 1; }
 #grouprow { height: 3; align: left middle; }
 #grouprow Button { margin: 0 1; }
 #query { margin: 1 0; }
@@ -91,7 +95,8 @@ class HelpScreen(ModalScreen[None]):
                 "  支持 课程名 / 课程类别 / 开课院系 三个维度，每维度可多选、可并存；\n"
                 "  m 切换「任一命中 / 全部命中」；d 删除条目。\n\n"
                 "■ 通知（菜单「设置」→ 邮件通知）\n"
-                "  有空余名额且命中筛选时自动发邮件；同一课程有冷却去重。\n\n"
+                "  通过 gws（Google Workspace CLI）发送：请先 `gws auth login` 授权，\n"
+                "  并在「设置」填写 收件邮箱（发件账号可选）；同课通知有冷却去重。\n\n"
                 "■ 安全与节奏\n"
                 "  浏览器以后台窗口运行（不抢焦点，可点开 Dock/任务栏窗口实时查看）；\n"
                 "  相邻操作随机间隔、轮询间隔带抖动，模仿人类；\n"
@@ -328,6 +333,58 @@ class FilterScreen(ModalScreen[None]):
 
 
 # ---------------------------------------------------------------------------
+# 首次配置向导（初次启动强制出现；之后仍可在「设置」中修改）
+# ---------------------------------------------------------------------------
+
+class FirstRunScreen(ModalScreen[None]):
+    BINDINGS = [Binding("escape", "later", "稍后再说")]
+
+    def _app(self) -> "CourserApp":
+        return self.app  # type: ignore[return-value]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="firstrunbox"):
+            yield Label("[bold cyan]首次使用 courser[/] — 请先完成两项配置",
+                        classes="help-title")
+            yield Static(
+                "开始监控前需要先配置好以下内容（以后仍可在「⚙ 设置」修改）：\n\n"
+                "1. gws（Google Workspace CLI）——负责发送提醒邮件\n"
+                "   安装并授权：\n"
+                "     brew install gws     （或 npm i -g @googleworkspace/cli）\n"
+                "     gws auth login       （浏览器完成 OAuth2 授权，仅一次）\n\n"
+                "2. 在「⚙ 设置」中填写：\n"
+                "   · 收件邮箱 —— 提醒邮件发送到的地址\n"
+                "   · gws 发件账号（你的 Gmail，可选）\n"
+                "   建议顺手点「📧 发送测试邮件」验证。\n\n"
+                "（学号/密码、筛选条件、轮询间隔也都在「设置」中；\n"
+                "   学号/密码留空则依赖浏览器密码管理器自动填充。）",
+                id="firstruntext")
+            with Horizontal(id="frbtns"):
+                yield Button("⚙ 前往设置", id="fr_settings", variant="primary")
+                yield Button("✓ 我已配置完成", id="fr_done", variant="success")
+                yield Button("稍后再说", id="fr_later", variant="default")
+
+    @on(Button.Pressed, "#fr_settings")
+    def _go_settings(self, event: Button.Pressed) -> None:
+        self._app().action_open_settings()
+
+    @on(Button.Pressed, "#fr_done")
+    def _done(self, event: Button.Pressed) -> None:
+        self._app().cfg.first_run_done = True
+        self._app().cfg.save()
+        self._app().log_line("✔ 首次配置完成，可以开始监控了")
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#fr_later")
+    def _later(self, event: Button.Pressed) -> None:
+        self._app().log_line("提示：完成配置前无法启动监控（gws + 收件邮箱）")
+        self.dismiss(None)
+
+    def action_later(self) -> None:
+        self._later(None)
+
+
+# ---------------------------------------------------------------------------
 # 设置（唯一入口：所有配置集中在此）
 # ---------------------------------------------------------------------------
 
@@ -345,12 +402,10 @@ class SettingsScreen(ModalScreen[None]):
                 yield Input(placeholder="学号 / 用户名", id="set_user")
                 yield Input(placeholder="密码（留空=自动填充）", id="set_pass", password=True)
 
-                yield Label("[bold]邮件通知[/]（Gmail 应用专用密码即可，无需额外命令行工具）")
-                yield Input(placeholder="收件人邮箱", id="set_to")
-                yield Input(placeholder="SMTP 服务器（默认 smtp.gmail.com）", id="set_host")
-                yield Input(placeholder="SMTP 端口（465=SSL / 587=STARTTLS）", id="set_port")
-                yield Input(placeholder="发件账号（Gmail 地址）", id="set_smtp_user")
-                yield Input(placeholder="应用专用密码", id="set_smtp_pass", password=True)
+                yield Label("[bold]邮件通知[/]（通过 gws 发送，需先 `gws auth login` 授权）")
+                yield Static(id="set_gws_status")
+                yield Input(placeholder="收件人邮箱（提醒发送到的地址）", id="set_to")
+                yield Input(placeholder="gws 发件账号（Gmail 地址，可选）", id="set_gws_from")
                 yield Input(placeholder="同课通知冷却（分钟）", id="set_mail_cooldown")
 
                 yield Label("[bold]轮询节奏[/]（自动带随机抖动）")
@@ -382,11 +437,11 @@ class SettingsScreen(ModalScreen[None]):
         c, n = cfg.credentials, cfg.notify
         self.query_one("#set_user", Input).value = c.username
         self.query_one("#set_pass", Input).value = c.password
+        gws_ok = "✓ 已安装" if notifier.gws_available() else "✗ 未找到 gws 命令"
+        self.query_one("#set_gws_status", Static).update(
+            f"gws 状态：{gws_ok}（安装后执行 gws auth login 授权）")
         self.query_one("#set_to", Input).value = n.to
-        self.query_one("#set_host", Input).value = n.smtp_host
-        self.query_one("#set_port", Input).value = str(n.smtp_port)
-        self.query_one("#set_smtp_user", Input).value = n.smtp_user
-        self.query_one("#set_smtp_pass", Input).value = n.smtp_pass
+        self.query_one("#set_gws_from", Input).value = n.gws_from
         self.query_one("#set_mail_cooldown", Input).value = str(n.min_interval_min)
         self.query_one("#set_interval", Input).value = str(cfg.interval_min)
         self.query_one("#set_jitter", Input).value = str(cfg.interval_jitter)
@@ -409,12 +464,7 @@ class SettingsScreen(ModalScreen[None]):
         cfg.credentials.password = self.query_one("#set_pass", Input).value
         n = cfg.notify
         n.to = self.query_one("#set_to", Input).value.strip()
-        host = self.query_one("#set_host", Input).value.strip()
-        if host:
-            n.smtp_host = host
-        n.smtp_port = int(self._float("#set_port", 465))
-        n.smtp_user = self.query_one("#set_smtp_user", Input).value.strip()
-        n.smtp_pass = self.query_one("#set_smtp_pass", Input).value
+        n.gws_from = self.query_one("#set_gws_from", Input).value.strip()
         n.min_interval_min = self._float("#set_mail_cooldown", 15.0)
         cfg.interval_min = self._float("#set_interval", 8.0)
         cfg.interval_jitter = self._float("#set_jitter", 0.4)
@@ -424,13 +474,15 @@ class SettingsScreen(ModalScreen[None]):
         cfg.window = self.query_one("#set_window", Select).value
         cfg.filters.match = self.query_one("#set_match", Select).value
         cfg.force_relogin = self.query_one("#set_relogin", Switch).value
+        cfg.first_run_done = True
         cfg.save()
 
     @on(Button.Pressed, "#set_save")
     def _save(self, event: Button.Pressed) -> None:
         self._apply()
-        self._app().log_line("✔ 设置已保存")
+        self._app().log_line("✔ 设置已保存，首次配置完成")
         self.dismiss(None)
+        self._app()._maybe_close_first_run()
 
     @on(Button.Pressed, "#set_cancel")
     @on(Button.Pressed, "#set_x")
@@ -579,6 +631,16 @@ class CourserApp(App):
         self.set_interval(1.0, self._tick)
         self.log_line(f"启动：筛选 {FilterSet(self.cfg.filters).describe()}")
         self.log_line("菜单：监控 / 筛选 / 设置 / 帮助；快捷键见底部 Footer。")
+        self.call_after_refresh(self._maybe_first_run)
+
+    def _maybe_first_run(self) -> None:
+        if not self.cfg.first_run_done and not isinstance(self.screen, FirstRunScreen):
+            self.push_screen(FirstRunScreen())
+            self.log_line("首次使用：请先完成配置（gws + 收件邮箱）")
+
+    def _maybe_close_first_run(self) -> None:
+        if isinstance(self.screen, FirstRunScreen) and self.cfg.first_run_done:
+            self.pop_screen()
 
     def _setup_table(self) -> None:
         dt = self.query_one("#table", DataTable)
@@ -675,16 +737,23 @@ class CourserApp(App):
         fp.update("[bold]筛选概览[/]\n" + fs.describe() + "\n"
                   f"[dim]视图：{self.VIEW_NAMES[self.view]}（按 v 切换）[/]")
         n = self.cfg.notify
+        gws_txt = "gws ✓" if notifier.gws_available() else "gws ✗"
         mp = self.query_one("#mail_panel", Static)
-        mp.update("[bold]邮件通知[/]\n"
+        mp.update("[bold]邮件通知（gws）[/]\n"
                   f"收件人 {n.to or '—'}\n"
-                  f"发件 {n.smtp_user or '—'}@{n.smtp_host or ''}\n"
-                  + ("[green]配置完整 ✓[/]" if n.configured else "[red]未配置 ✗[/]"))
+                  f"发件 {n.gws_from or '（认证账号）'}\n"
+                  + (f"[green]{gws_txt} · 已配置 🎯[/]" if n.configured and notifier.gws_available()
+                     else "[red]未配置/未授权 ✗[/]"))
 
     # -- actions ----------------------------------------------------------
     def action_toggle_monitor(self) -> None:
         w = self.watcher
         if w is None:
+            return
+        if not self.cfg.first_run_done:
+            self.notify("首次使用请先完成配置（gws + 收件邮箱），已为你打开设置",
+                        severity="warning", timeout=6)
+            self.action_open_settings()
             return
         if w.running:
             w.stop()

@@ -1,4 +1,5 @@
 {
+  "first_run_done": false,
   "interval_min": 8.0,
   "interval_jitter": 0.4,
   "page_delay_min": 6.0,
@@ -23,10 +24,7 @@
   },
   "notify": {
     "to": "you@example.com",
-    "smtp_host": "smtp.gmail.com",
-    "smtp_port": 465,
-    "smtp_user": "",
-    "smtp_pass": "",
+    "gws_from": "",
     "min_interval_min": 15.0
   }
 }

@@ -8,21 +8,32 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 使用临时配置，避免冒烟测试污染真实 config.json
+_tmpdir = tempfile.mkdtemp(prefix="courser-smoke-")
+os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
+
 from courser.config import Config  # noqa: E402
-from courser.tui import (CourserApp, FilterScreen, HelpScreen,  # noqa: E402
-                         IntervalModal, SettingsScreen)
+from courser.tui import (CourserApp, FilterScreen, FirstRunScreen,  # noqa: E402
+                         HelpScreen, IntervalModal, SettingsScreen)
 
 
 async def main() -> int:
     cfg = Config.load()
+    cfg.first_run_done = False  # 验证首次向导会弹出
     app = CourserApp(cfg)
     async with app.run_test() as pilot:
-        await pilot.pause()
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, FirstRunScreen), \
+            f"expect FirstRunScreen on first launch, got {type(app.screen)}"
+        app.pop_screen()  # 关掉向导，进入主界面
+        await pilot.pause(0.1)
         # 帮助
         app.action_open_help()
         await pilot.pause()

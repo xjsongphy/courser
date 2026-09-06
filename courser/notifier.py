@@ -1,63 +1,89 @@
-"""邮件通知。
+"""邮件通知：通过 gws（Google Workspace CLI）发送。
 
-推荐方式：Gmail「应用专用密码」(App Password) + SMTP —— 无需额外命令行工具，
-Python 标准库 smtplib 即可（要求 Gmail 开启两步验证后生成 16 位应用密码）。
-发件/收件、服务器均可配置，也可换成任意支持 SMTP 的邮箱（如 163/QQ 开 SMTP 服务）。
+gws = https://github.com/googleworkspace/cli（npm 包 @googleworkspace/cli，
+本机 brew 安装于 /opt/homebrew/bin/gws）。gws 需由用户自行安装并完成授权：
+
+    gws auth login        # 浏览器完成 OAuth2 授权
+
+本模块组装 RFC822 邮件 → base64url → 调 Gmail API users.messages.send。
+不依赖 smtplib，也不要求填写 SMTP 密码；发件账号由 gws 认证账号提供
+（也可在「设置」里指定 gws_from）。
 """
 
 from __future__ import annotations
 
-import smtplib
-import ssl
+import base64
+import json
+import shutil
+import subprocess
 from email.message import EmailMessage
 from typing import Callable, Optional
 
 from .config import Notify
 
-_MISSING_HINT = (
-    "邮件未配置或配置不完整：需要 收件人(to)、发件账号(smtp_user)、"
-    "应用专用密码(smtp_pass)。Gmail 请先开启两步验证，再在 "
-    "https://myaccount.google.com/apppasswords 生成 16 位应用密码，"
-    "填入「设置 → 邮件通知」（或 .env 的 SMTP_USER/SMTP_PASS）。"
-)
+_GWS = "gws"
+_AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
+              "然后在 courser「设置」中填写 收件邮箱（gws 发件账号可选）。")
+
+
+def gws_available() -> bool:
+    return shutil.which(_GWS) is not None
+
+
+def _gws_profile_email(log: Optional[Callable[[str], None]] = None) -> Optional[str]:
+    """读取 gws 认证账号的邮箱（只读接口，失败返回 None）。"""
+    try:
+        proc = subprocess.run(
+            [_GWS, "gmail", "users", "getProfile", "--params", '{"userId":"me"}'],
+            capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            return json.loads(proc.stdout).get("emailAddress")
+    except Exception as exc:  # noqa: BLE001
+        if log:
+            log(f"读取 gws 账号邮箱失败：{exc}")
+    return None
 
 
 def send_email(notify: Notify, subject: str, body: str,
                log: Optional[Callable[[str], None]] = None) -> bool:
-    if not notify.configured:
-        msg = _MISSING_HINT
+    if not notify.to:
         if log:
-            log(msg)
-        else:
-            print("[notifier]", msg)
+            log("邮件未配置：请在「设置 → 邮件通知」填写 收件邮箱。")
+        return False
+    if not gws_available():
+        if log:
+            log("未找到 gws 命令：\n" + _AUTH_HINT)
         return False
 
-    msg = EmailMessage()
-    msg["From"] = notify.smtp_user
-    msg["To"] = notify.to
-    msg["Subject"] = subject
-    msg.set_content(body)
+    from_addr = notify.gws_from or _gws_profile_email(log) or "me"
 
+    mime = EmailMessage()
+    mime["From"] = from_addr
+    mime["To"] = notify.to
+    mime["Subject"] = subject
+    mime.set_content(body)
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("ascii").rstrip("=")
+
+    cmd = [_GWS, "gmail", "users", "messages", "send",
+           "--params", '{"userId":"me"}', "--json", json.dumps({"raw": raw})]
     try:
-        if notify.smtp_port == 587:
-            with smtplib.SMTP(notify.smtp_host, notify.smtp_port, timeout=30) as s:
-                s.ehlo()
-                s.starttls(context=ssl.create_default_context())
-                s.login(notify.smtp_user, notify.smtp_pass)
-                s.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(notify.smtp_host, notify.smtp_port, timeout=30,
-                                  context=ssl.create_default_context()) as s:
-                s.login(notify.smtp_user, notify.smtp_pass)
-                s.send_message(msg)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        out, err = (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        if proc.returncode == 0:
+            try:
+                mid = json.loads(out).get("id", "?")
+            except Exception:  # noqa: BLE001
+                mid = "?"
+            if log:
+                log(f"邮件已发送 → {notify.to}（gws messageId={mid}）主题：{subject}")
+            return True
         if log:
-            log(f"邮件已发送 → {notify.to} 主题：{subject}")
-        return True
+            log(f"gws 发送失败（exit={proc.returncode}）：{err[:300] or out[:300]}\n"
+                f"若提示未授权，请执行：gws auth login")
+        return False
     except Exception as exc:  # noqa: BLE001
         if log:
-            log(f"邮件发送失败：{exc}")
-        else:
-            print("[notifier] 邮件发送失败:", exc)
+            log(f"gws 调用异常：{exc}")
         return False
 
 

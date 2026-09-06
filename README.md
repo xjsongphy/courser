@@ -78,6 +78,9 @@ uv run courser          # 或 uv run python -m courser.tui
 
 界面由**菜单栏**驱动（也提供快捷键，详见底部 Footer / 帮助）：
 
+> **首次启动**会弹出「首次配置」向导，要求先配置 gws 与收件邮箱
+> （之后仍可在「⚙ 设置」里修改，且未完成配置前无法启动监控）。
+
 | 菜单 | 功能 |
 |------|------|
 | ⏵ 监控 | 开始/停止定时轮询；「立即抓取」手动跑一轮；「间隔」修改轮询分钟数 |
@@ -95,51 +98,50 @@ uv run courser          # 或 uv run python -m courser.tui
 
 ```jsonc
 {
-  "interval_min": 8.0,          // 轮询基本间隔（分钟），实际 ±40% 随机抖动
+  "first_run_done": false,       // 首次配置向导完成标记（初次启动会强制弹向导）
+  "interval_min": 8.0,           // 轮询基本间隔（分钟），实际 ±40% 随机抖动
   "interval_jitter": 0.4,
-  "page_delay_min": 6.0,        // 相邻翻页随机间隔（秒）
+  "page_delay_min": 6.0,         // 相邻翻页随机间隔（秒）
   "page_delay_max": 14.0,
-  "session": "courser-watch",   // opencli 会话名
-  "window": "background",       // 浏览器窗口模式：background=后台不抢焦点
-  "force_relogin": true,        // 每轮先登出再重新登录
+  "session": "courser-watch",    // opencli 会话名
+  "window": "background",        // 浏览器窗口模式：background=后台弹出、不抢焦点
+  "force_relogin": true,         // 每轮先登出再重新登录
   "credentials": { "username": "", "password": "" },  // 留空=依赖自动填充
   "filters": {
     "names": [],
     "categories": ["通识课I类", "通识核心课I类"],
     "depts": ["英语语言文学系"],
-    "match": "any"              // any=任一维度命中 / all=全部维度命中
+    "match": "any"               // any=任一维度命中 / all=全部维度命中
   },
   "notify": {
-    "to": "you@example.com",
-    "smtp_host": "smtp.gmail.com",
-    "smtp_port": 465,           // 465=SSL / 587=STARTTLS
-    "smtp_user": "",
-    "smtp_pass": "",
-    "min_interval_min": 15.0    // 同一课程两次通知的最小间隔（分钟）
+    "to": "you@example.com",  // 收件邮箱（提醒发送到的地址）
+    "gws_from": "",                // gws 发件账号（Gmail 地址，可选；默认取认证账号）
+    "min_interval_min": 15.0       // 同一课程两次通知的最小间隔（分钟）
   }
 }
 ```
 
-## 邮件通知（Gmail 应用专用密码）
+> `config.json` 与 `.env` 均被 .gitignore 忽略，不会提交到仓库。
 
-**Gmail 有命令行工具吗？** 不需要额外命令行工具——Python 标准库 `smtplib` 即可：
+## 邮件通知（gws = Google Workspace CLI）
 
-1. Gmail 开启**两步验证**
-2. 到 <https://myaccount.google.com/apppasswords> 生成 16 位「应用专用密码」
-3. 填入 courser「设置 → 邮件通知」（smtp_user 为 Gmail 地址，smtp_pass 为应用密码），
-   或写入 `.env`：
+courser 通过 **gws 命令行工具**发送邮件（Gmail API），**不需要** SMTP 密码/应用专用密码：
 
-```bash
-MAIL_TO=you@example.com
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USER=you@gmail.com
-SMTP_PASS=xxxx xxxx xxxx xxxx   # 16 位应用专用密码
-```
+1. 安装 gws（macOS 已装；其他平台二选一）：
 
-4. 「设置」里点 **📧 发送测试邮件** 验证；也可 `uv run python scripts/test_mail.py`
+   ```bash
+   brew install gws            # 或 npm i -g @googleworkspace/cli
+   gws auth login              # 浏览器完成 OAuth2 授权（仅一次）
+   ```
 
-也支持任意 SMTP 邮箱（163/QQ 等开启 SMTP 服务后改 smtp_host/port/user/pass 即可）。
+2. 在 courser「设置 → 邮件通知」填写：
+   - **收件邮箱**（提醒发送到的地址，例如 you@example.com）
+   - **gws 发件账号**（你的 Gmail 地址，可选；默认使用 gws 认证账号）
+
+3. 点 **📧 发送测试邮件** 验证；也可 `uv run python scripts/test_mail.py`
+
+> 未安装/未授权 gws 时，「设置」里会显示 gws ✗；监控不会假报"已发送"。
+> gws 也支持 Google Workspace 的 Drive/Sheets 等，courser 只用它的 Gmail 发送能力。
 
 ## 命令行 / 脚本
 
@@ -160,7 +162,7 @@ courser/
 │   ├── human.py       # 人类节奏：随机间隔、抖动
 │   ├── fetch.py       # 登录 → 补退选 → 动态翻页只读抓取
 │   ├── filters.py     # 三维度多值筛选匹配
-│   ├── notifier.py    # SMTP 邮件通知（去重/冷却在 watcher）
+│   ├── notifier.py    # gws 邮件通知（去重/冷却在 watcher）
 │   ├── watcher.py     # 后台监控线程（每轮重新登录）
 │   ├── config.py      # config.json + .env
 │   └── tui.py         # Textual TUI（菜单 / 筛选 / 设置 / 帮助）
@@ -173,6 +175,7 @@ courser/
 ## 常见问题
 
 - **登录失败，提示"密码管理器未自动填充"**：在 Chrome 里确认已保存该站点密码；多数情况下直接在 courser「设置」配置学号/密码最稳。
+- **邮件发不出**：确认 `gws auth login` 已授权、「设置 → 邮件通知」里收件邮箱非空，然后点「发送测试邮件」看日志。
 - **要求输入验证码**：courser 不会输入验证码——请到真实 Chrome 手动登录一次，之后降低轮询频率。
 - **「立即抓取」很久没动静**：每轮包含重新登录 + 翻页的随机人类间隔，几分钟内完成是正常节奏。
 - **opencli 连不上**：`opencli doctor` 检查 daemon / 扩展 / Chrome。
