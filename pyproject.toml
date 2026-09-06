@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "PKU 补退选空余名额监控：opencli 驱动后台 Chrome，人类节奏轮询，命中筛选即邮件提醒（Textual TUI）"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "rich>=15.0.0",
     "textual>=8.2.8",
