@@ -51,9 +51,25 @@ opencli browser <session> ... (真实 Chrome，后台窗口)
 
 ## 环境要求
 
+courser 需要你自行安装并配置 **两个官方的命令行工具**（本仓库不内置、不替你配置）：
+
+### 1. opencli —— 驱动浏览器（登录、翻页、抓取）
+
+- 官方仓库：<https://github.com/jackwener/OpenCLI>（npm 包 `@jackwener/opencli`）
+- 安装：`npm install -g @jackwener/opencli`
+- 配置：安装 Chrome 扩展 [OpenCLI](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk) 并启动 daemon；检查 `opencli doctor` 全绿
+
+### 2. gws —— 发送提醒邮件（Google Workspace CLI）
+
+- 官方仓库：<https://github.com/googleworkspace/cli>（npm 包 `@googleworkspace/cli`）
+- 安装：`brew install gws` 或 `npm i -g @googleworkspace/cli`
+- 配置：`gws auth login`（浏览器完成一次 OAuth2 授权）
+
+> 两者都只在本机运行：opencli 控制你自己的 Chrome，gws 使用你自己的 Google 账号发邮件。
+
+### 其他要求
+
 - macOS / Linux（已适配 macOS）
-- [OpenCLI](https://github.com/jackwener/OpenCLI) 安装并跑通（`opencli doctor` 全绿）：
-  `npm install -g @jackwener/opencli`，安装 Chrome 扩展、启动 daemon
 - Python ≥ 3.12 + [uv](https://docs.astral.sh/uv/)（本项目用 uv 管理环境）
 - Chrome 中有北大学号/密码的自动填充（**或**在 courser「设置」中直接配置学号/密码，
   二选一；部分环境下自动化窗口不做自动填充，建议直接配置）
@@ -125,7 +141,7 @@ uv run courser          # 或 uv run python -m courser.tui
 
 ## 邮件通知（gws = Google Workspace CLI）
 
-courser 通过 **gws 命令行工具**发送邮件（Gmail API），**不需要** SMTP 密码/应用专用密码：
+courser 通过 **gws**（[googleworkspace/cli](https://github.com/googleworkspace/cli)）命令行工具发送邮件（Gmail API），**不需要** SMTP 密码/应用专用密码：
 
 1. 安装 gws（macOS 已装；其他平台二选一）：
 
