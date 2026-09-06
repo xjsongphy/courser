@@ -116,19 +116,28 @@ def _plain_body(courses: list, ts: str) -> str:
 
 def _html_body(courses: list, ts: str) -> str:
     esc = lambda s: html.escape(s or "", quote=True)
+
+    def td(value: str, extra: str = "") -> str:
+        return f"<td{extra}>{esc(value)}</td>"
+
     rows = []
     for c in courses:
         seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
         avail = str(c.avail) if c.avail >= 0 else "—"
-        tds = [
-            esc(c.course_no), esc(c.name), esc(c.category), esc(c.credits),
-            esc(c.weekly_hours), esc(c.teacher), esc(c.class_no), esc(c.dept),
-            esc(c.grade),
-            f'<td style="max-width:260px;word-break:break-all;">{esc(c.schedule)}</td>',
-            esc(seats),
-            f'<td style="color:#c0392b;font-weight:bold;text-align:center;">{esc(avail)}</td>',
-        ]
-        rows.append("<tr>" + "".join(tds) + "</tr>")
+        rows.append("<tr>" + "".join([
+            td(c.course_no),
+            td(c.name),
+            td(c.category),
+            td(c.credits),
+            td(c.weekly_hours),
+            td(c.teacher),
+            td(c.class_no),
+            td(c.dept),
+            td(c.grade),
+            td(c.schedule, ' style="max-width:260px;word-break:break-all;"'),
+            td(seats),
+            td(avail, ' style="color:#c0392b;font-weight:bold;text-align:center;"'),
+        ]) + "</tr>")
     return (
         "<html><body style=\"font-family:Helvetica,Arial,'PingFang SC','Microsoft YaHei',sans-serif;"
         "font-size:14px;color:#222;\">"
