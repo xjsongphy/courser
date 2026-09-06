@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import fetch, notifier
+from . import fetch, notifier, risk as riskmod
 from .config import Config, STATE_FILE
 from .filters import FilterSet
 from .human import jitter
@@ -34,6 +34,9 @@ class RoundResult:
     matched: list = field(default_factory=list)
     notified: list = field(default_factory=list)
     duration_s: float = 0.0
+    warning_hit: bool = False        # 页面检测到风控提示语
+    risk_percent: int = 0            # 刷课机警告触发率估计（0~100）
+    risk_label: str = "无"
 
 
 class Watcher:
@@ -52,6 +55,7 @@ class Watcher:
         self._state: dict = self._load_state()
         self._lock = threading.Lock()
         self._round_lock = threading.Lock()
+        self.risk = riskmod.BotRisk()
 
     # -- 状态持久化（课程 seq -> 上次空余 / 上次通知时间） -----------------
     def _load_state(self) -> dict:
@@ -119,6 +123,12 @@ class Watcher:
             r.pages = fr.pages
             r.total = len(fr.courses)
             r.courses = fr.courses
+            r.warning_hit = fr.warning_hit
+            if fr.warning_hit:
+                self.risk.mark_warning()
+                self.log("⚠ 检测到页面出现风控/警告提示语，已判定为高触发率，本轮照常结束但请人工关注")
+            r.risk_percent, r.risk_label = self.risk.evaluate(
+                pages=r.pages, duration_s=time.time() - t0)
             if not fr.ok:
                 r.ok = False
                 r.error = fr.error
@@ -126,7 +136,9 @@ class Watcher:
                 return r
             r.total = len(fr.courses)
             self.log(f"本轮抓取完成：{r.pages} 页，共 {r.total} 门课程；"
-                     f"登录方式={fr.login_mode}")
+                     f"登录方式={fr.login_mode}；风控触发率≈{r.risk_percent}%（{r.risk_label}）")
+            if r.warning_hit:
+                self.log("⚠ 建议暂停监控并人工登录一次，恢复后再以更低频率继续")
             fs = FilterSet(self.cfg.filters)
             r.matched = fs.matched(fr.courses)
             seats = [c for c in r.matched if c.has_seats]
@@ -165,7 +177,12 @@ class Watcher:
             if self._stop.is_set():
                 break
             base = self.cfg.interval_min * 60
-            wait = jitter(base, self.cfg.interval_jitter)
+            if self.last_result and self.last_result.warning_hit:
+                # 检测到风控提示：下一轮等待时间放大 3~5 倍，明显放慢节奏
+                wait = jitter(base * 4.0, 0.3)
+                self.log(f"⚠ 本轮命中风控提示，已放慢节奏：约 {wait / 60:.1f} 分钟后下一轮")
+            else:
+                wait = jitter(base, self.cfg.interval_jitter)
             self.next_round_ts = time.time() + wait
             self.log(f"本轮结束，约 {wait / 60:.1f} 分钟后开始下一轮")
             # 分段 sleep，便于及时响应停止

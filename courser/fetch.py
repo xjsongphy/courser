@@ -81,6 +81,7 @@ class FetchResult:
     login_mode: str = ""          # login_click / sso_auto
     ok: bool = True
     error: str = ""
+    warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +124,7 @@ _EXTRACT_JS = r"""
     pager: pm ? { cur: +pm[1], total: +pm[2] } : null,
     has_next: !!next,
     next_href: next ? next.getAttribute('href') : null,
+    warning: /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body),
     tables: tables.map(t => ({ nrows: t.rows.length, header: t.header, rows: t.rows }))
   });
 })()
@@ -190,8 +192,8 @@ def _parse_course(header: list[str], cells: list[str], links: list[dict]) -> Cou
     return c
 
 
-def _parse_page(data: dict) -> tuple[list[Course], dict]:
-    """返回 (可用课程列表, 分页信息)。只关心第一个含课程表头的表格。"""
+def _parse_page(data: dict) -> tuple[list[Course], dict, bool]:
+    """返回 (可用课程列表, 分页信息, 页面是否含风控提示语)。只关心第一个含课程表头的表格。"""
     courses: list[Course] = []
     for t in data.get("tables") or []:
         header, rows = t.get("header") or [], t.get("rows") or []
@@ -199,10 +201,12 @@ def _parse_page(data: dict) -> tuple[list[Course], dict]:
             courses.append(_parse_course(header, r.get("cells") or [], r.get("links") or []))
         break  # 只取第一个课程列表表格（补退选可用列表）
     pager = data.get("pager") or {}
-    return courses, {"has_next": bool(data.get("has_next")),
-                     "next_href": data.get("next_href"),
-                     "cur": (pager or {}).get("cur"),
-                     "total": (pager or {}).get("total")}
+    return (courses,
+            {"has_next": bool(data.get("has_next")),
+             "next_href": data.get("next_href"),
+             "cur": (pager or {}).get("cur"),
+             "total": (pager or {}).get("total")},
+            bool(data.get("warning")))
 
 
 def _absolute(href: str) -> str:
@@ -336,14 +340,16 @@ def walk_pages(session: str, window: Optional[str] = None,
                log: Optional[Callable[[str], None]] = None) -> tuple[list[Course], dict]:
     courses: list[Course] = []
     pages = 0
-    meta = {"pages": 0, "finished": False}
+    warning_hit = False
+    meta = {"pages": 0, "finished": False, "warning_hit": False}
 
     while pages < max_pages:
         data = oc.eval_js(session, _EXTRACT_JS)
         if not isinstance(data, dict):
             raise FetchError("页面提取失败：eval 未返回 JSON")
-        page_courses, pager = _parse_page(data)
+        page_courses, pager, warned = _parse_page(data)
         courses.extend(page_courses)
+        warning_hit = warning_hit or warned
         pages += 1
 
         if log:
@@ -367,6 +373,7 @@ def walk_pages(session: str, window: Optional[str] = None,
         sleep_rand(2.0, 4.0)
 
     meta["pages"] = pages
+    meta["warning_hit"] = warning_hit
     return courses, meta
 
 
@@ -382,6 +389,7 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
         goto_supplement(session, window=window, log=log)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing, log=log)
         result.pages = meta.get("pages", 0)
+        result.warning_hit = bool(meta.get("warning_hit"))
     except (FetchError, oc.OpenCliError) as exc:
         result.ok = False
         result.error = str(exc)

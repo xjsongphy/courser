@@ -33,6 +33,13 @@ from .watcher import RoundResult, Watcher
 
 GROUPS = [("names", "课程名"), ("categories", "课程类别"), ("depts", "开课院系")]
 
+
+def _risk_text(percent: int, label: str) -> str:
+    """按风险等级渲染"风控触发率"，Static 默认启用 rich markup。"""
+    color = {"无": "green", "低": "green", "中": "yellow",
+             "高": "red", "极高": "red", "已触发/疑似": "bold red"}.get(label, "yellow")
+    return f"风控[bold {color}] {percent}%({label})[/]"
+
 APP_CSS = """
 CourserApp { background: #101014; }
 #menubar { height: 3; padding: 0 1; align: left middle; }
@@ -726,11 +733,13 @@ class CourserApp(App):
         if w.last_result:
             last = (f"{w.last_result.pages}页/{w.last_result.total}课 "
                     f"{w.last_result.duration_s:.0f}s" + (" ✔" if w.last_result.ok else " ✗"))
+        risk = "风控 --" if not w.last_result else _risk_text(w.last_result.risk_percent,
+                                                             w.last_result.risk_label)
         fs = FilterSet(self.cfg.filters)
         mail = "已配置" if self.cfg.notify.configured else "未配置"
         st.update(
             f"{run_state} | 间隔 {self.cfg.interval_min}min±{int(self.cfg.interval_jitter * 100)}%"
-            f" | 下一轮 {countdown} | 上一轮 {last} | "
+            f" | 下一轮 {countdown} | 上一轮 {last} | {risk} | "
             f"筛选 {fs.describe()} | 邮件 {mail}")
         self.query_one("#btn_monitor", Button).label = "⏸ 停止" if w.running else "⏵ 监控"
         fp = self.query_one("#filters_panel", Static)
