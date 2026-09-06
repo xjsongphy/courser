@@ -94,8 +94,8 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
 
 ```bash
 uv run courser --once                      # 跑一轮并打印结果（可配 cron）
-uv run python scripts/recon_snapshot.py    # 抓全补退选列表 → data/courses_snapshot.json
 uv run python scripts/test_mail.py         # 测试邮件
+uv run python scripts/simulate_seats.py    # 模拟"有空余"触发提醒邮件
 uv run python scripts/smoke_tui.py         # TUI 无头冒烟
 ```
 
@@ -112,7 +112,7 @@ courser/
 │   ├── watcher.py      # 后台监控线程（每轮重新登录）
 │   ├── config.py       # config.json + .env
 │   └── tui.py          # Textual TUI（菜单 / 筛选 / 设置 / 帮助）
-├── scripts/            # recon_snapshot / test_mail / smoke_tui
+├── scripts/            # test_mail / simulate_seats / smoke_tui
 ├── config.example.json
 ├── .env.example
 └── pyproject.toml      # uv 管理（入口 courser.tui:main）
