@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = Path(os.environ.get("COURSER_CONFIG", str(PROJECT_ROOT / "config.json")))
 DATA_DIR = PROJECT_ROOT / "data"
 STATE_FILE = DATA_DIR / "notified.json"
+SEND_LOG_FILE = DATA_DIR / "send_log.json"   # 每小时发送预算的发送时间戳日志
 
 
 def _env(key: str, default: str = "") -> str:
@@ -44,6 +45,7 @@ class Notify:
     to: str = ""                       # 收件人邮箱（提醒的目标地址，TUI 设置 / MAIL_TO 提供）
     gws_from: str = ""                 # gws 发件账号（Gmail 地址，可选；默认取认证账号）
     min_interval_min: float = 15.0     # 同一课程两次通知的最小间隔（分钟）
+    max_per_hour: int = 5              # 每小时最多发送的邮件封数（只限发信，不影响查询轮次）
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "Notify":
@@ -52,6 +54,7 @@ class Notify:
             to=str(d.get("to", "") or _env("MAIL_TO", "")),
             gws_from=str(d.get("gws_from", "") or _env("GWS_FROM", "")),
             min_interval_min=float(d.get("min_interval_min", 15.0)),
+            max_per_hour=max(1, int(d.get("max_per_hour", 5))),
         )
 
     @property
@@ -148,7 +151,8 @@ class Config:
                             "password": self.credentials.password},
             "filters": self.filters.to_dict(),
             "notify": {"to": self.notify.to, "gws_from": self.notify.gws_from,
-                       "min_interval_min": self.notify.min_interval_min},
+                       "min_interval_min": self.notify.min_interval_min,
+                       "max_per_hour": self.notify.max_per_hour},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")

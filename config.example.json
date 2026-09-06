@@ -25,6 +25,7 @@
   "notify": {
     "to": "you@example.com",
     "gws_from": "",
-    "min_interval_min": 15.0
+    "min_interval_min": 15.0,
+    "max_per_hour": 5
   }
 }

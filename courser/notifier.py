@@ -127,12 +127,12 @@ def _html_body(courses: list, ts: str) -> str:
         rows.append("<tr>" + "".join([
             td(c.course_no),
             td(c.name),
-            td(c.category),
+            td(c.category, ' style="text-align:center;"'),
             td(c.teacher),
             td(c.class_no),
             td(c.dept),
             td(c.schedule, ' style="max-width:260px;word-break:break-all;"'),
-            td(seats),
+            td(seats, ' style="text-align:center;"'),
             td(avail, ' style="color:#c0392b;font-weight:bold;text-align:center;"'),
         ]) + "</tr>")
     return (
@@ -143,9 +143,11 @@ def _html_body(courses: list, ts: str) -> str:
         "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\" "
         "style=\"border-collapse:collapse;border-color:#ccc;\">"
         "<thead><tr style=\"background:#eef2f8;\">"
-        "<th>课程号</th><th>课程名</th><th>课程类别</th>"
+        "<th>课程号</th><th>课程名</th>"
+        "<th style=\"text-align:center;\">课程类别</th>"
         "<th>教师</th><th>班号</th><th>开课单位</th>"
-        "<th>上课/考试信息</th><th>限数/已选</th><th>空余</th>"
+        "<th>上课/考试信息</th>"
+        "<th style=\"text-align:center;\">限数/已选</th><th>空余</th>"
         "</tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"

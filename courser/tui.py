@@ -413,6 +413,8 @@ class SettingsScreen(ModalScreen[None]):
                 yield Static(id="set_gws_status")
                 yield Input(placeholder="收件人邮箱（提醒发送到的地址）", id="set_to")
                 yield Input(placeholder="gws 发件账号（Gmail 地址，可选）", id="set_gws_from")
+                yield Input(placeholder="每小时最多发送（封，默认5；只限发信不影响查询）",
+                            id="set_mail_limit")
                 yield Input(placeholder="同课通知冷却（分钟）", id="set_mail_cooldown")
 
                 yield Label("[bold]轮询节奏[/]（自动带随机抖动）")
@@ -449,6 +451,7 @@ class SettingsScreen(ModalScreen[None]):
             f"gws 状态：{gws_ok}（安装后执行 gws auth login 授权）")
         self.query_one("#set_to", Input).value = n.to
         self.query_one("#set_gws_from", Input).value = n.gws_from
+        self.query_one("#set_mail_limit", Input).value = str(n.max_per_hour)
         self.query_one("#set_mail_cooldown", Input).value = str(n.min_interval_min)
         self.query_one("#set_interval", Input).value = str(cfg.interval_min)
         self.query_one("#set_jitter", Input).value = str(cfg.interval_jitter)
@@ -472,6 +475,7 @@ class SettingsScreen(ModalScreen[None]):
         n = cfg.notify
         n.to = self.query_one("#set_to", Input).value.strip()
         n.gws_from = self.query_one("#set_gws_from", Input).value.strip()
+        n.max_per_hour = max(1, int(self._float("#set_mail_limit", 5)))
         n.min_interval_min = self._float("#set_mail_cooldown", 15.0)
         cfg.interval_min = self._float("#set_interval", 8.0)
         cfg.interval_jitter = self._float("#set_jitter", 0.4)

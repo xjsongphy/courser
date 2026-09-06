@@ -18,7 +18,8 @@
 ## 功能特性
 
 - **三维度多值筛选** — 课程名 / 课程类别 / 开课院系，多选并存，「任一 / 全部」命中可切换
-- **名额邮件提醒** — 限数 > 已选 → gws 发邮件，同课冷却去重
+- **名额邮件提醒** — 限数 > 已选 → gws 发邮件（选课网表格样式），同课冷却去重
+- **每小时发送上限** — 1 小时内最多发 n 封（默认 5，设置可调）；只限发信、不影响查询轮次
 - **每轮重新登录** — 登出 → IAAA 登录 → 补退选，不长期挂会话
 - **动态页数解析** — 每轮读取分页器真实翻页，页数变化无需改配置
 - **人类节奏** — 操作随机间隔、轮询 ± 抖动；不输验证码，风控自动降速提示
@@ -86,6 +87,7 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
     "to": "you@example.com",        // 收件邮箱
     "gws_from": "",                 // gws 发件账号（可选）
     "min_interval_min": 15.0        // 同课通知冷却（分钟）
+    "max_per_hour": 5               // 每小时最多发送封数（只限发信，不影响查询）
   }
 }
 ```
@@ -95,6 +97,7 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
 ```bash
 uv run courser --once                      # 跑一轮并打印结果（可配 cron）
 uv run python scripts/test_mail.py         # 测试邮件
+uv run python scripts/test_pipeline.py      # 全链路测试（解析→判断→冷却→预算→发送）
 uv run python scripts/simulate_seats.py    # 模拟"有空余"触发提醒邮件
 uv run python scripts/smoke_tui.py         # TUI 无头冒烟
 ```
@@ -112,7 +115,7 @@ courser/
 │   ├── watcher.py      # 后台监控线程（每轮重新登录）
 │   ├── config.py       # config.json + .env
 │   └── tui.py          # Textual TUI（菜单 / 筛选 / 设置 / 帮助）
-├── scripts/            # test_mail / simulate_seats / smoke_tui
+├── scripts/            # test_pipeline / test_mail / simulate_seats / smoke_tui
 ├── config.example.json
 ├── .env.example
 └── pyproject.toml      # uv 管理（入口 courser.tui:main）

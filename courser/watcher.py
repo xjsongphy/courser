@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import fetch, notifier, risk as riskmod
-from .config import Config, STATE_FILE
+from .config import Config, SEND_LOG_FILE, STATE_FILE
 from .filters import FilterSet
 from .human import jitter
 
@@ -99,6 +99,51 @@ class Watcher:
                               "dept": c.dept,
                               "category": c.category}
 
+    # -- 每小时发送上限（只限发信，不影响查询轮次） ---------------------
+    def _send_log(self) -> list[float]:
+        try:
+            if SEND_LOG_FILE.exists():
+                return [float(t) for t in json.loads(SEND_LOG_FILE.read_text(encoding="utf-8"))]
+        except Exception:
+            pass
+        return []
+
+    def _budget_ok(self) -> bool:
+        now = time.time()
+        recent = [t for t in self._send_log() if now - t < 3600]
+        return len(recent) < self.cfg.notify.max_per_hour
+
+    def _record_send(self) -> None:
+        now = time.time()
+        recent = [t for t in self._send_log() if now - t < 3600]
+        recent.append(now)
+        try:
+            SEND_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SEND_LOG_FILE.write_text(json.dumps(recent), encoding="utf-8")
+        except Exception:
+            pass
+
+    # -- 通知决策：同课冷却去重 → 每小时预算 → 组装邮件发送 --------------
+    def _notify_seats(self, seats: list) -> list:
+        with self._lock:
+            notifiable = [c for c in seats if self._should_notify(c)]
+            if not notifiable:
+                self.log("无可新通知课程（同课冷却期内）")
+                return []
+            if not self._budget_ok():
+                self.log(f"⚠ 已达每小时发送上限（{self.cfg.notify.max_per_hour} 封），"
+                         f"本轮跳过发送；查询/翻页不受影响")
+                return []
+            for c in notifiable:
+                self._mark_notified(c)
+            self._save_state()
+            self._record_send()
+        subject = notifier.build_subject(notifiable)
+        text, html_body = notifier.build_body(notifiable,
+                                              time.strftime("%Y-%m-%d %H:%M:%S"))
+        notifier.send_email(self.cfg.notify, subject, text, body_html=html_body, log=self.log)
+        return notifiable
+
     # -- 一轮 ------------------------------------------------------------
     def run_round(self) -> RoundResult:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
@@ -143,19 +188,9 @@ class Watcher:
             r.matched = fs.matched(fr.courses)
             seats = [c for c in r.matched if c.has_seats]
             if seats:
-                self.log(f"命中 {len(r.matched)} 门，其中 {len(seats)} 门有空余名额 → 检查通知")
-                with self._lock:
-                    for c in seats:
-                        if self._should_notify(c):
-                            r.notified.append(c)
-                            self._mark_notified(c)
-                    self._save_state()
-                if r.notified:
-                    subject = notifier.build_subject(r.notified)
-                    text, html_body = notifier.build_body(r.notified,
-                                                          time.strftime("%Y-%m-%d %H:%M:%S"))
-                    notifier.send_email(self.cfg.notify, subject, text,
-                                        body_html=html_body, log=self.log)
+                self.log(f"命中 {len(r.matched)} 门，其中 {len(seats)} 门有空余名额 → 检查通知"
+                         f"（每小时发送上限 {self.cfg.notify.max_per_hour} 封）")
+                r.notified = self._notify_seats(seats)
             else:
                 self.log(f"命中 {len(r.matched)} 门，暂无空余名额"
                          + ("" if r.matched else "（且当前筛选条件未命中任何课程）"))
