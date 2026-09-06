@@ -163,7 +163,7 @@ class FilterScreen(ModalScreen[None]):
                 for _gid, gname in GROUPS:
                     yield Button(gname, id=f"grp_{_gid}", classes="groupbtn")
             yield Static(id="match_label")
-            yield Input(placeholder="🔍 查询：输入即过滤；回车添加/切换选中（如：通识核心课I类 / 英语）",
+            yield Input(placeholder="🔍 查询：输入即过滤；回车添加/切换选中（如：通识课(通识核心课I) / 英语）",
                         id="query")
             with Horizontal(id="fsbody"):
                 yield ListView(id="cands")

@@ -3,6 +3,7 @@ config.json
 .env
 data/
 *.log
+.gws-*/
 
 # ---- Python / uv ----
 .venv/
