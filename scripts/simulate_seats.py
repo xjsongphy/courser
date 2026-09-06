@@ -28,11 +28,11 @@ def main() -> int:
     cfg = Config.load()
 
     fake_courses = [
-        Course(course_no="SIM0001", name="综合英语（模拟）", category="通识课(通识核心课I)",
+        Course(course_no="SIM0001", name="综合英语（模拟）", category="通识课(通识核心课III)",
                dept="英语语言文学系", quota=50, selected=49, avail=1,
                teacher="张三(教授)", class_no="1",
                schedule="1~16周 每周周二3~4节", status="可申请", seq="SIM-0001"),
-        Course(course_no="SIM0002", name="模拟通选课（模拟）", category="通识课(通选课I)",
+        Course(course_no="SIM0002", name="模拟通选课（模拟）", category="通识课(通选课III)",
                dept="外国语学院", quota=40, selected=38, avail=2,
                teacher="李四(副教授)", class_no="1",
                schedule="1~16周 每周周四5~6节", status="可申请", seq="SIM-0002"),

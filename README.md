@@ -78,7 +78,7 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
   "credentials": { "username": "", "password": "" },   // 留空=依赖自动填充
   "filters": {
     "names": [],
-    "categories": ["通识课(通识核心课I)", "通识课(通选课I)"],
+    "categories": ["通识课(通选课III)", "通识课(通识核心课III)"],
     "depts": ["英语语言文学系"],
     "match": "any"                  // any=任一命中 / all=全部命中
   },
