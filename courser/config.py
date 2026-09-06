@@ -41,7 +41,7 @@ class Credentials:
 class Notify:
     """邮件通知（通过 gws = Google Workspace CLI 发送，需用户自行安装并 gws auth login）。"""
 
-    to: str = "you@example.com"   # 收件人邮箱（提醒的目标地址）
+    to: str = ""                       # 收件人邮箱（提醒的目标地址，TUI 设置 / MAIL_TO 提供）
     gws_from: str = ""                 # gws 发件账号（Gmail 地址，可选；默认取认证账号）
     min_interval_min: float = 15.0     # 同一课程两次通知的最小间隔（分钟）
 
@@ -49,7 +49,7 @@ class Notify:
     def from_dict(cls, d: Optional[dict]) -> "Notify":
         d = d or {}
         return cls(
-            to=str(d.get("to", "") or _env("MAIL_TO", "you@example.com")),
+            to=str(d.get("to", "") or _env("MAIL_TO", "")),
             gws_from=str(d.get("gws_from", "") or _env("GWS_FROM", "")),
             min_interval_min=float(d.get("min_interval_min", 15.0)),
         )
