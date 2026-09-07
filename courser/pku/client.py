@@ -316,11 +316,23 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
     except Exception:
         url_now, form_ok, page, console = "?", False, "", ""
     detail = "；".join(login_errs) or "未知"
+    # 只有真的检测到 #code_area 才提示验证码，避免凭空气反误导（浏览器可能并无验证码）
+    evidence = ""
+    try:
+        evidence = _login_evidence(session)
+    except Exception:
+        pass
+    has_captcha = bool(evidence) and "code" in evidence and \
+        "'code': 'none'" not in evidence and '"code": "none"' not in evidence
+    if has_captcha:
+        hint = ("页面出现验证码/二次验证（courser 不输入验证码），"
+                "请先在 Chrome 手动登录一次（手动登录后可复用会话来继续）。")
+    else:
+        hint = ("仍未进入选课页（非验证码问题）。请确认：若自动填充未生效，请在「设置」"
+                "配置学号/密码；若账号密码已正确填入却仍无法进入，请在 Chrome 手动登录一次后重试。")
     raise LoginError(
         f"登录未成功。尝试记录：{detail}；当前 url={url_now}，登录表单在位={form_ok}；"
-        f"页面提示：{page}\n浏览器控制台：{console}\n"
-        f"提示：若页面要求验证码/二次验证（courser 不输入验证码），请先在 Chrome 手动登录一次；"
-        f"若是自动填充未生效，请在「设置」配置学号/密码。")
+        f"页面提示：{page}\n浏览器控制台：{console}\n提示：{hint}")
 
 
 # ---------------------------------------------------------------------------
