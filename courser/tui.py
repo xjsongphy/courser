@@ -106,9 +106,9 @@ Input:focus { border: none; }
 
 #logscroll, #helpscroll, #detscroll { height: 1fr; }
 #filters_list, #settings_list, #setupbody { height: auto; }
-#faddrow, #seditrow, #setupeditrow { height: 1; margin-top: 1; display: none; }
-#faddrow Static, #seditrow Static, #setupeditrow Static { color: cyan; }
-#faddrow Input, #seditrow Input, #setupeditrow Input { width: 1fr; }
+#seditrow, #setupeditrow { height: 1; margin-top: 1; display: none; }
+#seditrow Static, #setupeditrow Static { color: cyan; }
+#seditrow Input, #setupeditrow Input { width: 1fr; }
 
 #keys, #runstate { height: 1; padding: 0 1; }
 """
@@ -218,6 +218,9 @@ class CourserApp(App):
         self.f_dim = 0
         self.f_idx = 0
         self.f_top = 0
+        self.f_query = ""              # pi 式顶部输入即筛
+        self.auto_gather = True        # 无最近结果时进入筛选页自动抓一轮生成候选
+        self._gathering = False
         # settings draft 与行索引
         self.sd: dict[str, str] = {}
         self.s_rows: list[tuple[str, dict]] = []
@@ -431,13 +434,11 @@ class CourserApp(App):
                 yield Static("", id="coursehead", markup=True)
                 yield Static("", id="courselist", markup=True)
                 yield Static("", id="event", markup=True)
-            # 筛选（列表 + 按 i 才出现的一行自定义输入）
+            # 筛选（pi 式：顶部输入即筛 + 列表，↑↓ 选，空格/回车 切换）
             with Vertical(id="page-filters"):
                 yield Static("", id="filters_hdr", markup=True)
+                yield Static("", id="fsearch", markup=True)
                 yield Static("", id="filters_list", markup=True)
-                with Horizontal(id="faddrow"):
-                    yield Static("添加自定义（回车确认 · esc 取消）：", classes="inlabel")
-                    yield Input(placeholder="输入要加入当前维度的条目", id="fadd_input")
             # 设置
             with Vertical(id="page-settings"):
                 yield Static("", id="settings_hdr", markup=True)
@@ -488,8 +489,8 @@ class CourserApp(App):
                 "[cyan]1/2/3[/] 全部/筛选/空余 · [cyan]f[/] 筛选 · "
                 "[cyan]s[/] 设置 · [cyan]l[/] 日志 · [cyan]h[/] 帮助 · "
                 "[cyan]q[/] 退出",
-        "filters": "[cyan]Tab[/] 切维度 · [cyan]↑↓[/] 移动 · [cyan]空格[/] 选中/取消 · "
-                   "[cyan]i[/] 添加自定义 · [cyan]回车[/] 保存并返回 · "
+        "filters": "[cyan]输入即筛[/] · [cyan]↑↓[/] 移动 · [cyan]空格[/] 选中 · "
+                   "[cyan]回车[/] 选中/完成 · [cyan]Tab[/] 维度 · "
                    "[cyan]Esc[/] 放弃并返回",
         "settings": "[cyan]↑↓[/] 选择 · [cyan]←/→[/] 切换选项 · [cyan]回车[/] 编辑 · "
                     "[cyan]t[/] 测试邮件 · [cyan]ctrl+s[/] 保存 · [cyan]Esc[/] 放弃",
@@ -561,7 +562,6 @@ class CourserApp(App):
     def _clear_editing(self) -> None:
         self._editing = None
         self._editing_key = None
-        self.query_one("#faddrow", Horizontal).display = False
         self.query_one("#seditrow", Horizontal).display = False
         self.query_one("#setupeditrow", Horizontal).display = False
         # 焦点还给惰性锚，避免停在隐藏输入行上吞键
@@ -643,11 +643,30 @@ class CourserApp(App):
     # 渲染：筛选页
     # ------------------------------------------------------------------
     def _begin_filters(self) -> None:
-        self._f_backup = copy.deepcopy(self.cfg.filters)  # Esc 放弃的依据
+        self._f_backup = copy.deepcopy(self.cfg.filters)  # Esc 放弃依据
         self.f_dim = 0
+        self.f_query = ""
         self.f_idx = 0
         self.f_top = 0
         self._render_filters_list()
+        self._ensure_candidates()
+
+    def _ensure_candidates(self) -> None:
+        # 候选来自最近一次抓取结果（candidate_lists）。若一个结果都没有，
+        # 自动抓一轮来生成候选，避免用户面对空列表无从选择。
+        if not self.auto_gather or self._gathering or self.courses:
+            return
+        if self.watcher and self.watcher.running:
+            return
+        self._gathering = True
+        self.log_line("暂无最近抓取结果，自动抓取一轮以生成候选…")
+        self._render_filters_list()
+        self._run_round()
+
+    def _on_gather_done(self) -> None:
+        self._gathering = False
+        if self.page == "filters":
+            self._render_filters_list()
 
     def _filters_entries(self) -> list[str]:
         return list(getattr(self.cfg.filters, GROUPS[self.f_dim][0]))
@@ -659,35 +678,53 @@ class CourserApp(App):
         self._render_filters_list()
 
     def _filters_items(self) -> list[str]:
-        """候选 = 快照里该维度的值 + 已选但不在候选中的条目（原样保留）。"""
+        """当前列表 = 快照候选（按输入即筛的查询过滤）+ 已选但不在候选里的。"""
         gid = GROUPS[self.f_dim][0]
+        q = self.f_query.lower()
         seen = set(self.candidate_lists[gid])
-        items = list(self.candidate_lists[gid])
+        items = [e for e in self.candidate_lists[gid] if (not q or q in e.lower())]
         for e in getattr(self.cfg.filters, gid):
-            if e not in seen:
+            if e not in seen and (not q or q in e.lower()):
                 items.append(e)
         return items
 
     def _render_filters_list(self) -> None:
-        hdr = self.query_one("#filters_hdr", Static)
         dim_name = GROUPS[self.f_dim][1]
         entries = set(self._filters_entries())
         mode = "满足任一条件" if self.cfg.filters.match != "all" else "满足全部条件"
-        hdr.update(
-            f"[bold]筛选配置[/]   维度 [cyan]Tab[/] 切换：{dim_name}"
-            f"（{len(entries)} 已选）\n"
-            f"组合方式：[cyan]{mode}[/]   [dim]↑↓ 选择 · 空格 选中/取消 · 回车 保存 · "
-            f"esc 放弃[/]")
+        self.query_one("#filters_hdr", Static).update(
+            f"[bold]筛选配置[/]   维度 [cyan]Tab[/]：{dim_name}"
+            f"（已选 {len(entries)}）· 组合：[cyan]{mode}[/]")
+        # pi 式输入即筛行
+        fs = self.query_one("#fsearch", Static)
+        if self._gathering:
+            fs.update("[dim]正在抓取候选…（完成后会自动列出课程名 / 课程类别 / 开课院系）[/]")
+        else:
+            q = escape(self.f_query)
+            fs.update(f"[cyan]❯ 搜索：[/]{q}[cyan]▍[/]"
+                      f"[dim]  输入即筛 · ↑↓ 移动 · 空格选中/回车完成 · Tab 维度 · "
+                      f"esc 返回[/]")
         items = self._filters_items()
         listw = self.query_one("#filters_list", Static)
         if not items:
-            listw.update("[dim]（暂无候选；抓取一轮后会自动收集课程名/类别/院系）[/]")
+            if self._gathering:
+                listw.update("")
+                return
+            if self.f_query:
+                listw.update(
+                    f"[dim]没有匹配「{escape(self.f_query)}」的候选。"
+                    f"清空输入浏览全部；确实要加的条目按 i 手动添加。[/]")
+            else:
+                listw.update(
+                    "[dim]本维度暂无候选。\n"
+                    "  候选取自最近一次抓取结果；还没有结果时，进入本页会自动抓一轮。\n"
+                    "  仍无匹配，可按 i 手动添加一条。[/]")
             return
         if self.f_idx >= len(items):
             self.f_idx = len(items) - 1
         if self.f_idx < self.f_top:
             self.f_top = self.f_idx
-        maxlines = max(3, min(20, self.size.height - 9))
+        maxlines = max(3, min(20, self.size.height - 12))
         if self.f_idx >= self.f_top + maxlines:
             self.f_top = self.f_idx - maxlines + 1
         window = items[self.f_top:self.f_top + maxlines]
@@ -721,6 +758,20 @@ class CourserApp(App):
         else:
             lst.append(value)
             self.log_line(f"已添加筛选：{value}")
+        self._render_filters_list()
+
+    def _filters_type(self, char: str) -> None:
+        self.f_query += char
+        self.f_idx = 0
+        self.f_top = 0
+        self._render_filters_list()
+
+    def _filters_backspace(self) -> None:
+        if not self.f_query:
+            return
+        self.f_query = self.f_query[:-1]
+        self.f_idx = 0
+        self.f_top = 0
         self._render_filters_list()
 
     def _leave_filters(self, commit: bool) -> None:
@@ -862,9 +913,9 @@ class CourserApp(App):
             "  登出 → IAAA 登录（自动填充或设置内填学号/密码）→ 补退选\n"
             "  → 动态翻页读限/选 → 命中且空余经 gws 发邮件；人类节奏、绝不输验证码。\n\n"
             "[bold]筛选（f）[/]\n"
-            "  课程名 / 课程类别 / 开课院系三维度；Tab 切换维度；↑↓ 移动；\n"
-            "  空格 选中/取消；i 添加自定义条目（回车确认，esc 取消）；\n"
-            "  回车 保存，Esc 放弃（改动未保存前均不落盘）。\n"
+            "  课程名 / 课程类别 / 开课院系三维度；顶部输入即筛（含中文），↑↓ 移动，\n"
+            "  空格 选中/取消；有匹配时回车选中该项，无匹配时回车把它作为自定义条目加入；\n"
+            "  Tab 切维度；在空搜索框回车保存，Esc 放弃（改动未保存前均不落盘）。\n"
             "  主页课程列表用 ★ 标记符合筛选的课程。\n\n"
             "[bold]设置（s）[/]\n"
             "  账号、邮件通知、轮询节奏、行为；t 测试邮件（只用当前改动，不保存）；\n"
@@ -993,8 +1044,8 @@ class CourserApp(App):
             return
         k = event.key
         page = self.page
-        if k == "q":
-            # q = 全局退出（编辑输入中 q 会作为文本输入，已在上面 return）
+        # q = 退出（筛选页里 q 是搜索字符，用 Esc 返回后 q 或 Ctrl+C 退出）
+        if page != "filters" and k == "q":
             event.stop()
             self.exit()
             return
@@ -1018,6 +1069,7 @@ class CourserApp(App):
             self._main_key(k, event)
 
     def _filters_key(self, k: str, event: events.Key) -> None:
+        # pi 式：输入即筛、↑↓ 移动、空格/回车 选中；Tab 切维度
         if k == "tab":
             event.stop()
             self._filters_dim_cycle()
@@ -1027,45 +1079,65 @@ class CourserApp(App):
         elif k == "down":
             event.stop()
             self._filters_move(1)
-        elif k == "space":
+        elif k == "backspace":
             event.stop()
-            self._filters_toggle()
-        elif k == "enter":
-            event.stop()
-            self._leave_filters(commit=True)
-        elif k == "i":
-            event.stop()
-            self._filters_begin_add()
+            self._filters_backspace()
         elif k == "escape":
             event.stop()
-            self._leave_filters(commit=False)
-        # 其余键（含 q/1/2/3…）在本页不生效，保持固定语义
-
-    # 筛选页自定义条目添加（仅按 i 时出现一行输入）
-    def _filters_begin_add(self) -> None:
-        self._editing = "filteradd"
-        row = self.query_one("#faddrow", Horizontal)
-        inp = self.query_one("#fadd_input", Input)
-        row.display = True
-        inp.value = ""
-        inp.focus()
-
-    @on(Input.Submitted, "#fadd_input")
-    def _on_fadd_submit(self, event: Input.Submitted) -> None:
-        value = event.value.strip()
-        self._clear_editing()
-        if value:
-            gid = GROUPS[self.f_dim][0]
-            lst = getattr(self.cfg.filters, gid)
-            if value in lst:
-                self.log_line(f"已在筛选中：{value}")
+            if self.f_query:
+                self.f_query = ""
+                self.f_idx = 0
+                self.f_top = 0
+                self._render_filters_list()
             else:
-                lst.append(value)
-                # 候选里也补一份，方便立即看到并可再次切换
-                if value not in self.candidate_lists[gid]:
-                    self.candidate_lists[gid].append(value)
-                self.log_line(f"已添加自定义筛选：{value}（回车保存后生效）")
-        self._render_filters_list()
+                self._leave_filters(commit=False)
+        elif k in ("space", "enter"):
+            event.stop()
+            if k == "space":
+                if self.f_query:
+                    # 允许多词搜索：输入态空格作为搜索内容
+                    self._filters_type(" ")
+                else:
+                    self._filters_toggle()
+            else:  # enter
+                items = self._filters_items()
+                if self.f_query:
+                    if items and 0 <= self.f_idx < len(items):
+                        # 输入态回车：选中收窄后的当前项并清空输入，继续多选
+                        self._filters_toggle()
+                    else:
+                        # 无匹配候选：直接把输入当作自定义条目加入当前维度
+                        self._filters_add_custom(self.f_query)
+                    self.f_query = ""
+                    self.f_idx = 0
+                    self.f_top = 0
+                    self._render_filters_list()
+                else:
+                    self._leave_filters(commit=True)
+        else:
+            # 其它可打印字符 → 输入即筛（含中文）。Textual 字母的 char 常为空，
+            # 需回退到单字符的 key（如 'a'），否则用 char。
+            char = getattr(event, "char", None)
+            key = getattr(event, "key", "")
+            text = char if char else (key if len(key) == 1 else None)
+            if text and getattr(event, "is_printable", False):
+                event.stop()
+                self._filters_type(text)
+        # 其余按键在本页不生效，保持固定语义
+
+    def _filters_add_custom(self, value: str) -> None:
+        value = value.strip()
+        if not value:
+            return
+        gid = GROUPS[self.f_dim][0]
+        lst = getattr(self.cfg.filters, gid)
+        if value in lst:
+            self.log_line(f"已在筛选中：{value}")
+        else:
+            lst.append(value)
+            if value not in self.candidate_lists[gid]:
+                self.candidate_lists[gid].append(value)
+            self.log_line(f"已添加自定义筛选：{value}（回车保存后生效）")
 
     def _main_key(self, k: str, event: events.Key) -> None:
         if k in ("space",):
@@ -1238,8 +1310,12 @@ class CourserApp(App):
         if r.ok and r.courses:
             self.courses = r.courses
             self._save_snapshot(r)
+        if self._gathering:
+            self._on_gather_done()
         if self.page == "main":
             self._render_main(force=True)
+        elif self.page == "filters":
+            self._render_filters_list()
         self._render_runstate()
         if r.notified:
             names = "、".join(c.name for c in r.notified)

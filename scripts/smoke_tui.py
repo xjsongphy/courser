@@ -111,15 +111,25 @@ async def main() -> int:
         await p.pause(0.1)
         assert app.page == "main"
 
-        # 筛选：Tab 切维度、空格切换、回车保存
+        # 筛选（pi 式）：输入即筛 / Tab 维度 / 空格切换 / 回车保存
         await p.press("f")
         await p.pause(0.2)
         assert app.page == "filters"
-        assert app.f_dim == 0
+        assert app.f_dim == 0 and app.f_query == ""
+        await p.press("a")          # 键入字符进入顶部搜索行
+        await p.pause(0.1)
+        assert app.f_query == "a", "输入应进入顶部搜索行"
+        await p.press("backspace")
+        await p.pause(0.1)
+        assert app.f_query == ""
+        app._filters_type("英语")
+        assert app.f_query == "英语" and app._filters_items() == ["英语写作"], \
+            "输入即筛应收窄列表"
+        app.f_query = ""
+        app._render_filters_list()
         await p.press("tab")
         await p.pause(0.1)
         assert app.f_dim == 1, "Tab 应切到课程类别"
-        # 类别候选：英语类（已选/默认），空格取消
         await p.press("space")
         await p.pause(0.1)
         assert app.cfg.filters.categories == [], "空格应取消默认类别"
@@ -129,7 +139,7 @@ async def main() -> int:
         await p.press("enter")
         await p.pause(0.2)
         assert app.page == "main", "筛选回车应保存并返回"
-        # 再次进入，空格改动后 Esc 放弃
+        # 再次进入，改动后 Esc 放弃
         await p.press("f")
         await p.pause(0.2)
         await p.press("tab")   # 课程类别
@@ -142,18 +152,16 @@ async def main() -> int:
         assert app.page == "main", "Esc 应放弃并返回"
         assert app.cfg.filters.categories == ["英语类"], "Esc 应还原修改"
 
-        # 筛选：i 添加自定义（仅按 i 出现一行输入）→ 回车保存生效
+        # 筛选：无匹配输入 + 回车 = 作为自定义条目加入当前维度
         await p.press("f")
         await p.pause(0.2)
-        await p.press("i")
-        await p.pause(0.1)
-        fi = app.query_one("#fadd_input", Input)
-        assert fi.has_focus and app._editing == "filteradd", "按 i 应出现单行输入"
-        fi.value = "物理学院课程"
+        app.f_query = "物理学院课程"
+        app._render_filters_list()
         await p.press("enter")
-        await p.pause(0.1)
-        assert "物理学院课程" in app.cfg.filters.names, "自定义条目应加入当前维度"
-        await p.press("enter")   # 保存并返回
+        await p.pause(0.2)
+        assert "物理学院课程" in app.cfg.filters.names, "无匹配回车应加入自定义条目"
+        assert app.f_query == "", "加入后应清空搜索"
+        await p.press("enter")   # 空输入回车：保存并返回
         await p.pause(0.2)
         assert app.page == "main"
         assert "物理学院课程" in app.cfg.filters.names, "自定义条目应已保存"
@@ -214,6 +222,7 @@ async def main() -> int:
         qc = Config.load()
         qc.first_run_done = True
         qa = CourserApp(qc)
+        qa.auto_gather = False   # 测试不触发真实抓取
         async with qa.run_test(size=(100, 30)) as p2:
             await p2.pause(0.3)
             if page_key:
@@ -224,7 +233,7 @@ async def main() -> int:
             assert getattr(qa, "_exit", False) or not qa.is_running, \
                 f"{key} 未退出：page={qa.page}"
 
-    for page_key in (None, "f", "s", "l", "h"):
+    for page_key in (None, "s", "l", "h"):
         await _quit_case(page_key, "q")
     for page_key in (None, "f", "s"):
         await _quit_case(page_key, "ctrl+c")
