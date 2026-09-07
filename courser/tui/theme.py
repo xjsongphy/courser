@@ -8,10 +8,6 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
-
 from rich.cells import cell_len
 from rich.markup import escape
 from rich.text import Text
@@ -128,7 +124,7 @@ VerticalScroll:focus { border: none; }
 /* 主页 */
 #page-main { height: 1fr; min-height: 0; padding: 0 2; border: none;
              overflow: hidden; }
-#summary, #event { height: auto; }
+#summary { height: auto; }
 #courselist { height: 1fr; min-height: 1; overflow: hidden; }
 #coursehead { height: auto; }
 
@@ -166,12 +162,12 @@ FocusScroll {
     overflow-y: hidden;
 }
 
-/* 操作提示是可换行的正文；状态栏单独留出一条弱分隔线 */
-#runstate {
+/* 底部的全局活动状态行：固定一行；未着色内容用默认前景，次要信息由 dim 承担。 */
+#activity {
     height: 1;
+    min-height: 1;
     padding: 0 2;
-    border-top: solid #303030;
-    color: #777777;
+    content-align: center middle;
 }
 """
 
@@ -266,19 +262,3 @@ def field_mutate(cfg: Config, key: str, value: str) -> None:
         cfg.window = value
     else:
         setattr(cfg, key, float(value))
-
-
-def copy_to_clipboard(text: str) -> bool:
-    """把纯文本写入系统剪贴板（macOS pbcopy / Linux xclip|xsel）。"""
-    data = (text or "").encode("utf-8")
-    try:
-        if sys.platform == "darwin":
-            subprocess.run(["pbcopy"], input=data, check=True)
-            return True
-        for tool in ("xclip", "xsel"):
-            if shutil.which(tool):
-                subprocess.run([tool], input=data, check=True)
-                return True
-        return False
-    except Exception:
-        return False

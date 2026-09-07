@@ -39,7 +39,7 @@ from ..storage import SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
 from .theme import (COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
-                    FocusScroll, FocusableStatic, _hint, _pad, copy_to_clipboard,
+                    FocusScroll, FocusableStatic, _hint, _pad,
                     field_mutate, field_value, kv_row, page_hint, plain_markup,
                     risk_markup, shortcut_row, ui_error, ui_key, ui_label,
                     ui_meta, ui_ok, ui_section, ui_title, ui_value, ui_warn)
@@ -52,26 +52,9 @@ _page_hint = page_hint
 _plain_markup = plain_markup
 _field_value = field_value
 _field_mutate = field_mutate
-_copy_to_clipboard = copy_to_clipboard
 
-# 让系统终端的鼠标框选 + Cmd+C 复制照常工作：不进入备用屏
-# （alternate screen），把内容直接画在普通缓冲区里，
-# 这样拖动鼠标就能选中文字、Cmd+C 复制所选内容。
-try:
-    from textual.drivers.linux_driver import LinuxDriver as _LinuxDriver
-
-    class _NoAltScreenDriver(_LinuxDriver):
-        """LinuxDriver 子类：拦截并丢弃进入/退出备用屏的转义序列。"""
-
-        def write(self, data: str) -> None:
-            data = data.replace("\x1b[?1049h", "").replace("\x1b[?1049l", "")
-            if data:
-                super().write(data)
-
-    _NoAltDriver = _NoAltScreenDriver
-except Exception:  # pragma: no cover - 非 POSIX 平台回退到默认驱动
-    _NoAltDriver = None
-
+# 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
+_ACTIVITY_PAGES = {"main", "filters", "logs", "detail"}
 
 class CourserApp(App):
     """纯文本菜单 TUI：主页面 + 筛选/设置/日志/帮助/详情/首启设置。"""
@@ -79,16 +62,13 @@ class CourserApp(App):
     TITLE = "courser"
     SUB_TITLE = "PKU 补退选空余名额监控"
     CSS = CSS
+    # 复制完全交给终端，不使用 Textual 的应用内文本选择/剪贴板。
+    ALLOW_SELECT = False
     BINDINGS = [Binding("ctrl+c", "quit", "退出", show=False, priority=True)]
 
-    def get_driver_class(self):
-        """使用不进入备用屏的驱动，让系统终端能鼠标框选 + Cmd+C 复制。"""
-        if _NoAltDriver is not None:
-            return _NoAltDriver
-        return super().get_driver_class()
-
     def __init__(self, cfg: Config):
-        super().__init__()
+        # 空白区域使用终端自身的默认背景/调色板，不铺 Textual 深色主题底。
+        super().__init__(ansi_color=True)
         self.cfg = cfg
         self.page = "main"
         self.log_buf: list[str] = []
@@ -161,6 +141,30 @@ class CourserApp(App):
                     f"{r.duration_s:.0f}s", "成功", "")
         return (False, "", "", "失败", r.error or "")
 
+    @staticmethod
+    def _error_summary(detail: str) -> str:
+        """把异常现场压缩成主页可读的错误类型；原文只在日志页保留。"""
+        text = _plain_markup(detail or "")
+        if "验证码" in text or "二次验证" in text:
+            return "需要验证码"
+        if "登录" in text or "账号登录" in text:
+            return "登录失败"
+        if "邮件" in text or "gws" in text.lower():
+            return "邮件发送失败"
+        if "设置" in text and ("失败" in text or "错误" in text):
+            return "设置保存失败"
+        if "翻页" in text:
+            return "翻页失败"
+        if "提取" in text or "抓取" in text:
+            return "课程数据抓取失败"
+        if "风控" in text or "警告" in text:
+            return "风控提示"
+        if "异常" in text:
+            return "本轮异常"
+        if "失败" in text or "未成功" in text:
+            return "本轮抓取失败"
+        return "操作失败"
+
     def _last_round_markup(self, parts=None) -> str:
         """把 _last_round_parts 的结果套上排版（不含外部 label）。"""
         if parts is None:
@@ -174,10 +178,7 @@ class CourserApp(App):
                 seg.append(ui_meta(meta))
             seg.append(ui_ok(status))
             return "  ".join(seg)
-        seg = [ui_error(status)]
-        if detail:
-            seg.append(ui_meta(detail))
-        return "  ".join(seg)
+        return ui_error(self._error_summary(detail or status))
 
     def _mail_markup(self) -> str:
         if not notifier.gws_available():
@@ -194,6 +195,13 @@ class CourserApp(App):
         if ok:
             return ui_ok("✓ 可达（上次发送成功）")
         return ui_error("✗ 不可达（上次发送失败）")
+
+    def _google_status_markup(self) -> str:
+        """底部状态栏的紧凑 Google 连通性标记。"""
+        ok, _ts = notifier.last_mail_status()
+        if ok is None:
+            return ui_value("—")
+        return ui_ok("✓") if ok else ui_error("✗")
 
     def _labeled(self, label: str, content: str) -> str:
         """主页 summary 的一行：左侧 label 退后并对齐，右侧 content 自带排版。"""
@@ -216,7 +224,6 @@ class CourserApp(App):
             lines.append(self._labeled(
                 "筛选", f"{group_txt}  {ui_meta('满足' + mode + '条件')}"))
         lines.append(self._labeled("通知", self._mail_markup()))
-        lines.append(self._labeled("Google", self._google_markup()))
         if w and w.last_result:
             risk = _risk_markup(w.last_result.risk_percent,
                                 w.last_result.risk_label)
@@ -224,47 +231,6 @@ class CourserApp(App):
                 lines.append(self._labeled("风控", risk))
         return lines
 
-    def _event_line(self) -> str:
-        if not self.log_buf:
-            return ""
-        raw = self.log_buf[-1]
-        body = raw.split("  ", 1)[-1] if "  " in raw else raw
-        # watcher 的消息允许携带语义 markup；主页事件只显示其纯文本内容。
-        body = _plain_markup(body)
-        if "✗" in body or "失败" in body or "异常" in body:
-            color = "red"
-        elif "⚠" in body or "风控" in body:
-            color = "yellow"
-        elif "已发送" in body or "成功" in body or "完成" in body or "✓" in body:
-            color = "green"
-        else:
-            color = "default"
-        return f"[{color}]{ui_value(body)}[/]"
-
-    # ------------------------------------------------------------------
-    # 复制（yank）当前课程 / 文字到系统剪贴板
-    # ------------------------------------------------------------------
-    def _copy_text(self, text: str, label: str = "") -> None:
-        ok = _copy_to_clipboard(text)
-        head = label or (text or "").splitlines()[0][:40] if text else ""
-        self.log_line(("已复制" + ("：" + head if head else "")) if ok
-                      else "复制失败（本机缺少 pbcopy / xclip）")
-
-    def _copy_current_course(self) -> None:
-        rows = self._visible_rows()
-        if not rows or not (0 <= self.main.index < len(rows)):
-            self.log_line("没有可复制的课程（列表为空）")
-            return
-        c = rows[self.main.index]
-        seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
-        lines = [
-            f"{c.name} [{c.course_no}]（第 {c.page or '—'} 页）",
-            f"课程类别：{c.category}    开课单位：{c.dept}",
-            f"教师：{c.teacher}    班号：{c.class_no or '—'}",
-            f"限数/已选：{seats}    空余：{c.avail}    状态：{c.status or '—'}",
-            f"上课/考试信息：{c.schedule}",
-        ]
-        self._copy_text("\n".join(lines), label=f"{c.name} [{c.course_no}]")
 
     # ------------------------------------------------------------------
     # 课程行 / 自适应列
@@ -509,9 +475,7 @@ class CourserApp(App):
                 yield Static("", id="coursehead", markup=True)
                 yield Static("", id="searchinput", markup=True)
                 yield Static("", id="snapshot", markup=True)
-                yield Static("", id="progress", markup=True)
                 yield Static("", id="courselist", markup=True)
-                yield Static("", id="event", markup=True)
             # 筛选（pi 式：顶部输入即筛 + 列表，↑↓ 选，空格/回车 切换）
             with Vertical(id="page-filters"):
                 yield Static("", id="filters_hdr", markup=True)
@@ -537,7 +501,7 @@ class CourserApp(App):
             with Vertical(id="page-setup"):
                 yield Static("", id="setupbody", markup=True)
         yield Static("", id="keys")
-        yield Static("", id="runstate")
+        yield Static("", id="activity")
 
     def on_mount(self) -> None:
         self.watcher = MonitorScheduler(self.cfg, log=self._thread_log,
@@ -563,14 +527,14 @@ class CourserApp(App):
             ("1/2/3", "全部 / 筛选 / 空余"),
             ("/", "按列查找"), ("f", "筛选"), ("s", "设置"),
             ("l", "日志"), ("h", "帮助"),
-            ("y / Cmd+C", "复制当前课程"), ("q", "退出"),
+            ("q", "退出"),
         ),
         # 二级页面的 hint 直接渲染在内容末尾；这里保留短文本供编辑态复用。
         "filters": _page_hint("Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃"),
         "settings": _page_hint("↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃"),
-        "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · y / Cmd+C 复制 · Esc 返回"),
+        "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回"),
         "help": _page_hint(),
-        "detail": _page_hint("y / Cmd+C 复制 · Esc 返回"),
+        "detail": _page_hint(),
         "setup": _page_hint("↓ 编辑收件邮箱 · 回车 继续 · Esc 退出程序"),
     }
 
@@ -613,7 +577,7 @@ class CourserApp(App):
         keys.display = page == "main"
         if page == "main":
             keys.update(self._main_hint())
-        self.query_one("#runstate", Static).display = page == "main"
+        self.query_one("#activity", Static).display = page in _ACTIVITY_PAGES
         self._render_runstate()
 
     def _render_current(self) -> None:
@@ -666,7 +630,7 @@ class CourserApp(App):
         self.query_one("#summary", Static).update(summary)
 
         rows = self._visible_rows()
-        # 课程窗口为底部可换行的操作提示和两行“最近一次”元信息让出空间。
+        # 课程窗口为底部可换行的操作提示、状态栏和“最近一次”元信息让出空间。
         hint_width = max(1, self.size.width - 4)
         hint_plain = _plain_markup(self._main_hint())
         hint_lines = sum(max(1, ceil(cell_len(line) / hint_width))
@@ -675,23 +639,16 @@ class CourserApp(App):
         # 查找区固定为标题 + “列” + “输入”三行；底部提示另行渲染，
         # 不再把快捷键挤在查找控件旁边。
         search_extra = 3 if self.main.search_col else 0
-        avail_h = max(1, self.size.height - 19 - snapshot_extra - search_extra
+        avail_h = max(1, self.size.height - 17 - snapshot_extra - search_extra
                       - max(0, hint_lines - 1))
         self._render_course_window(rows, avail_h)
         self._render_search_line()
         self.query_one("#keys", Static).update(self._main_hint())
-        ev = self._event_line()
-        self.query_one("#event", Static).update(ev if ev else "")
 
     def _render_main_lite(self) -> None:
-        """主页的轻量刷新（事件/运行状态行），不做整页重排。"""
+        """主页的轻量刷新（只刷底部全局活动状态行），不做整页重排。"""
         if self.page != "main":
             return
-        try:
-            ev = self._event_line()
-            self.query_one("#event", Static).update(ev if ev else "")
-        except Exception:
-            pass
         self._render_runstate()
 
     def _render_course_window(self, rows: list[Course], avail: int) -> None:
@@ -1093,7 +1050,7 @@ class CourserApp(App):
         lines = [ui_title("运行日志"), ""]
         if not self.log_buf:
             lines.extend([ui_meta("暂无日志；开始监控或抓取后这里会记录每一轮过程"), "",
-                          _page_hint("↑↓ / PgUp / PgDn 滚动 · y 复制 · Esc 返回")])
+                          _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回")])
             body.update("\n".join(lines))
             return
         for raw in self.log_buf[-300:]:
@@ -1109,7 +1066,7 @@ class CourserApp(App):
             else:
                 styled = ui_value(message)
             lines.append((f"{ui_meta(timestamp)}  " if timestamp else "") + styled)
-        lines.extend(["", _page_hint("↑↓ / PgUp / PgDn 滚动 · y 复制 · Esc 返回")])
+        lines.extend(["", _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回")])
         body.update("\n".join(lines))
 
     def _render_help(self) -> None:
@@ -1176,7 +1133,7 @@ class CourserApp(App):
                       "", ui_section("抓取信息"),
                       _kv_row("所属页", ui_value(str(fields.get("page") or "—")), width=12),
                       _kv_row("课程 ID", ui_value(str(fields.get("seq") or "—")), width=12),
-                      "", ui_meta("★ 表示符合当前筛选"), "", _page_hint("y 复制 · Esc 返回")])
+                      "", ui_meta("★ 表示符合当前筛选"), "", _page_hint()])
         self.query_one("#detbody", Static).update("\n".join(lines))
 
     def _render_setup(self) -> None:
@@ -1227,74 +1184,61 @@ class CourserApp(App):
     def _set_progress(self, done, total, op):
         self.prog.done, self.prog.total, self.prog.op = done, total, op
         try:
-            self._render_progress()
+            self._render_runstate()
         except Exception:
             pass
 
-    def _render_progress(self) -> None:
-        if self.page != "main":
-            return
-        try:
-            el = self.query_one("#progress", Static)
-        except Exception:
-            return
-        done, total, op = self.prog.done, self.prog.total, self.prog.op
-        if done is None:
-            el.update("")
-            return
-        W = max(8, min(28, max(10, self.size.width - 64)))
-        bar = ""
-        if total:
-            filled = int(W * max(0, min(1.0, done / total)))
-            bar = "[cyan]" + "█" * filled + "[/][dim]" + "░" * (W - filled) + "[/] "
-        frac = f"{done}/{total}" if total else str(done)
-        el.update(f"[bold]抓取进度 {frac} 步[/] {bar}[dim]· 当前：{ui_value(op)}[/]")
-
-    def _current_round_markup(self) -> Optional[str]:
-        """本轮进行中的实时信息：进度分数 + 已用时间（每秒由 _tick 刷新）。"""
-        w = self.watcher
-        if not (w and w.current_round_started_at):
-            return None
-        elapsed = time.time() - w.current_round_started_at
-        parts = []
+    def _activity_fetching(self, w) -> str:
+        """抓取过程中底栏只显示动态状态：抓取中 + 步数 + 用时 + 当前操作。"""
+        segs = [ui_value("抓取中")]
         if self.prog.done is not None:
             if self.prog.total:
-                parts.append(ui_value(f"{self.prog.done}/{self.prog.total} 页"))
+                segs.append(ui_value(f"{self.prog.done} / {self.prog.total} 步"))
             else:
-                parts.append(ui_value(f"{self.prog.done} 步"))
-        parts.append(ui_meta(f"{elapsed:.0f}s"))
-        return "  ".join(parts)
+                segs.append(ui_value(f"{self.prog.done} 步"))
+        elapsed = time.time() - w.current_round_started_at
+        segs.append(ui_meta(f"{elapsed:.0f}s"))
+        if self.prog.op:
+            segs.append(ui_meta(str(self.prog.op)))
+        return "   ".join(segs)
 
     def _render_runstate(self) -> None:
+        """底部唯一的全局 activity 行：抓取中 / 监控等待 / 空闲 —— 互斥，只留一行。"""
         w = self.watcher
-        running = bool(w and w.running)
-        if running:
+        if w and w.current_round_started_at is not None:
+            # 抓取中：动态状态最重要，下一轮/上一轮/Google 暂时全部让位。
+            line = self._activity_fetching(w)
+        elif w and w.running:
             run = ui_ok("● 监控中")
             cd = "--"
             if w.countdown_s is not None:
                 m, s = divmod(w.countdown_s, 60)
                 cd = f"{m} 分 {s:02d} 秒"
-            group_next = f"{ui_label('下一轮')}  {ui_value(cd)}"
+            nxt = f"{ui_label('下一轮')}  {ui_value(cd)}"
+            last = (self._last_round_markup()
+                    if w.last_result else ui_value("—"))
+            prv = f"{ui_label('上一轮')}  {last}"
+            ggg = f"{ui_label('Google')}  {self._google_status_markup()}"
+            line = "   ".join([run, nxt, prv, ggg])
         else:
-            run = ui_meta("未开始")
-            group_next = f"{ui_label('下一轮')}  {ui_meta('—')}"
-        group_last = f"{ui_label('上一轮')}  {self._last_round_markup()}"
-        groups = [run, group_next, group_last]
-        cur = self._current_round_markup()
-        if cur:
-            groups.insert(1, f"{ui_label('本轮')}  {cur}")
-        self.query_one("#runstate", Static).update("   ".join(groups))
+            run = ui_value("未开始")
+            last = (self._last_round_markup()
+                    if w and w.last_result else ui_value("—"))
+            prv = f"{ui_label('上一轮')}  {last}"
+            ggg = f"{ui_label('Google')}  {self._google_status_markup()}"
+            line = "   ".join([run, prv, ggg])
+        self.query_one("#activity", Static).update(line)
 
     def _render_status_ticker(self) -> None:
         self.set_interval(1.0, self._tick)
 
     def _tick(self) -> None:
+        # 空闲页没有倒计时或进度可更新；避免无意义的重绘清掉 VS Code
+        # 终端刚完成的鼠标选区。监控/抓取进行中才需要每秒刷新。
+        w = self.watcher
+        if not (w and (w.running or w.current_round_started_at)):
+            return
         self._render_runstate()
-        if self.page == "main":
-            try:
-                self._render_progress()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # 键盘路由
@@ -1331,12 +1275,6 @@ class CourserApp(App):
             if k == "escape":
                 event.stop()
                 self._show("main", force=True)
-            elif k in ("y", "cmd+c", "super+c") and page == "logs":
-                event.stop()
-                self._copy_text("\n".join(self.log_buf[-60:]))
-            elif k in ("y", "cmd+c", "super+c") and page == "detail":
-                event.stop()
-                self._copy_current_course()
             return
         # main
         if page == "main":
@@ -1470,9 +1408,6 @@ class CourserApp(App):
         elif k == "enter":
             event.stop()
             self._open_detail()
-        elif k in ("y", "cmd+c", "super+c"):
-            event.stop()
-            self._copy_current_course()
 
     def _move_cursor(self, step: int) -> None:
         rows = self._visible_rows()
@@ -1615,10 +1550,6 @@ class CourserApp(App):
         elif self.page == "filters":
             self._render_filters_list()
         self._render_runstate()
-        try:
-            self._render_progress()
-        except Exception:
-            pass
         if r.notified:
             names = "、".join(c.name for c in r.notified)
             self.log_line(f"[green]已发送提醒邮件：{names}[/]")
@@ -1652,7 +1583,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"限选/已选 {c.seats_raw} 空余 {c.avail} 状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
-    # mouse=False：纯键盘菜单界面（无主页输入框、无悬浮窗口）。
+    # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持备用屏。
     CourserApp(cfg).run(mouse=False)
     return 0
 

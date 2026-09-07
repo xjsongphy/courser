@@ -41,7 +41,7 @@ def _mk_courses() -> list[Course]:
     ]
 
 
-async def _render_at(w: int, h: int) -> tuple[CourserApp, str, str]:
+async def _render_at(w: int, h: int) -> tuple[str, str, int, str]:
     cfg = Config()
     cfg.first_run_done = True
     app = CourserApp(cfg)
@@ -52,12 +52,16 @@ async def _render_at(w: int, h: int) -> tuple[CourserApp, str, str]:
         app._render_main(force=True)
         body = str(app.query_one("#courselist").render())
         header = str(app.query_one("#coursehead").render())
-        return app, body, header
+        runstate = app.query_one("#activity")
+        return body, header, runstate.size.height, str(runstate.render())
 
 
 async def main() -> int:
     for w, h in _GEOMETRIES:
-        app, body, _ = await _render_at(w, h)
+        body, _, runstate_height, runstate_text = await _render_at(w, h)
+        assert runstate_height >= 1, f"{w}×{h} 状态栏正文被边框挤没"
+        assert "未开始" in runstate_text, f"{w}×{h} 状态栏未渲染"
+        assert "Google" in runstate_text, f"{w}×{h} Google 状态不在状态栏"
         lines = [ln for ln in body.splitlines() if ln.strip()]
         assert lines, f"{w}×{h} 无渲染结果"
         assert len(lines) >= 2, f"{w}×{h} 至少应有表头+数据行"
