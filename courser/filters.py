@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import Filters
-from .fetch import Course
+from .models import Course
 
 
 @dataclass
@@ -26,6 +26,16 @@ class FilterSet:
         fv = field_value or ""
         return any(e and e in fv for e in entries)
 
+    def _hit_categories(self, c: Course, entries: list[str]) -> bool:
+        """课程类别命中：一门课可同时属于多类，
+        只要任一独立类别包含任一筛选条目即命中（保留子串语义）。"""
+        if not entries:
+            return False
+        cats = c.categories
+        if not cats:
+            return False
+        return any(e and any(e in cat for cat in cats) for e in entries)
+
     def matches(self, c: Course) -> bool:
         if self.filters.empty:
             return False
@@ -33,7 +43,7 @@ class FilterSet:
         if self.filters.names:
             groups_hit.append(self._hit(c.name, self.filters.names))
         if self.filters.categories:
-            groups_hit.append(self._hit(c.category, self.filters.categories))
+            groups_hit.append(self._hit_categories(c, self.filters.categories))
         if self.filters.depts:
             groups_hit.append(self._hit(c.dept, self.filters.depts))
         if self.filters.match == "all":

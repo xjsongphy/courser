@@ -1,0 +1,92 @@
+"""领域模型（domain objects）。
+
+全系统共用的数据对象，不归属任何具体实现（抓取 / 监控 / UI 都不该自己定义它们）。
+- Course      补退选列表中的一门课程
+- FetchResult 一次抓取（一轮登录 + 翻页）的原始结果
+- RoundResult 一轮完整监控（抓取 → 筛选 → 通知决策）的最终结果
+- FetchError / LoginError  抓取流程异常
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+# 同一门课可同时属于多类（如「任选、思政选择性必修」），类别格内用分隔符并列
+_CATEGORY_SPLIT_RE = re.compile(r"[、,，/；;]")
+
+
+class FetchError(RuntimeError):
+    """抓取流程中的一般错误。"""
+
+
+class LoginError(FetchError):
+    """登录失败（可能需要验证码/二次验证，或账号问题）。"""
+
+
+@dataclass
+class Course:
+    """补退选列表中的一门课程（仅可用课程列表，不含已选课程）。"""
+
+    course_no: str = ""
+    name: str = ""
+    category: str = ""
+    credits: str = ""
+    weekly_hours: str = ""
+    teacher: str = ""
+    class_no: str = ""
+    dept: str = ""
+    grade: str = ""
+    schedule: str = ""
+    pnp: str = ""
+    seats_raw: str = ""
+    quota: Optional[int] = None      # 限数
+    selected: Optional[int] = None   # 已选
+    avail: int = -1                  # 空余 = 限数 - 已选；-1 表示未知
+    status: str = ""                 # 选课状态：可申请 / 不可申请 / 已选上 / (空)
+    seq: str = ""                    # 课程稳定 id（course_seq_no）
+    links: dict = field(default_factory=dict)
+    page: int = 0                    # 在选课网列表中的页码（1 起）
+
+    @property
+    def categories(self) -> list[str]:
+        """该课的独立课程类别。同一门课可同时属于多类，
+        如「任选、思政选择性必修」拆成 ['任选', '思政选择性必修'] 两类。"""
+        return [p for p in (s.strip() for s in _CATEGORY_SPLIT_RE.split(self.category)) if p]
+
+    @property
+    def has_seats(self) -> bool:
+        return self.avail > 0
+
+    @property
+    def key(self) -> str:
+        return self.seq or f"{self.course_no}#{self.class_no}"
+
+
+@dataclass
+class FetchResult:
+    courses: list[Course] = field(default_factory=list)
+    pages: int = 0
+    login_mode: str = ""          # login_click / sso_auto
+    ok: bool = True
+    error: str = ""
+    warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
+
+
+@dataclass
+class RoundResult:
+    ts: float = 0.0
+    ok: bool = True
+    error: str = ""
+    login_mode: str = ""
+    pages: int = 0
+    total: int = 0
+    courses: list = field(default_factory=list)
+    matched: list = field(default_factory=list)
+    notified: list = field(default_factory=list)
+    duration_s: float = 0.0
+    warning_hit: bool = False        # 页面检测到风控提示语
+    risk_percent: int = 0            # 刷课机警告触发率估计（0~100）
+    risk_label: str = "无"

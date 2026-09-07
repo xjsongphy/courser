@@ -1,26 +1,27 @@
-"""抓取补退选可用课程列表（只读）。
+"""浏览器工作流：登录 → 进入补退选 → 动态翻页抓取。
+
+这一层是「workflow」，不关心网页 JSON 如何变成 Course（那是 parser 的事）、
+也不负责筛选/通知（那是 runner 的事）。它只依赖：
+    opencli 适配器（真实浏览器交互）、parser（纯转换）、extract（注入 JS）、human（节奏）。
 
 流程（每一轮监控都会完整执行）：
-1. 退出旧会话（logout.do + iaaa logout.jsp，best-effort）
-2. 打开 IAAA OAuth 登录页
-   - 若已配置用户名/密码 → 依次 fill 后点登录
-   - 否则 → 等待密码管理器自动填充（1~2s），直接点登录
-   - 不做任何验证码输入；出现验证码/错误 → 抛 LoginError，由上层降速暂停
+1. 退出旧会话（logout.do，best-effort）
+2. 打开 IAAA OAuth 登录页；填凭据或等密码管理器自动填充，点登录
+   - 不做验证码输入；出现验证码/错误 → 抛 LoginError，由上层降速暂停
 3. 点击菜单「补退选」进入补退选页
-4. 动态翻页（每次解析 "Page X of Y" 分页器，不固定页数），
-   逐页只读提取可用课程列表中的 限数/已选 等字段
+4. 动态翻页（每次解析 "Page X of Y" 分页器，不固定页数），逐页只读提取可用课程
 """
 
 from __future__ import annotations
 
-import re
 import time
-import urllib.parse
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
-from . import opencli as oc
-from .human import sleep_rand
+from .. import opencli as oc
+from ..human import sleep_rand
+from ..models import Course, FetchError, FetchResult, LoginError
+from .extract import EXTRACT_JS, TABLE_READY_JS
+from . import parser
 
 LOGIN_URL = (
     "https://iaaa.pku.edu.cn/iaaa/oauth.jsp?appID=syllabus"
@@ -31,112 +32,6 @@ ELECTIVE_BASE = "https://elective.pku.edu.cn"
 LOGOUT_URL = ELECTIVE_BASE + "/elective2008/logout.do"
 # 注意：iaaa.pku.edu.cn/iaaa/logout.jsp 不存在（返回 404），不要用它；
 # elective 的 logout.do 已足够（会登出并重定向到 IAAA 登录页）。
-
-_SEATS_RE = re.compile(r"(\d+)\s*[/／]\s*(\d+)")
-
-
-class FetchError(RuntimeError):
-    """抓取流程中的一般错误。"""
-
-
-class LoginError(FetchError):
-    """登录失败（可能需要验证码/二次验证，或账号问题）。"""
-
-
-@dataclass
-class Course:
-    """补退选列表中的一门课程（仅可用课程列表，不含已选课程）。"""
-
-    course_no: str = ""
-    name: str = ""
-    category: str = ""
-    credits: str = ""
-    weekly_hours: str = ""
-    teacher: str = ""
-    class_no: str = ""
-    dept: str = ""
-    grade: str = ""
-    schedule: str = ""
-    pnp: str = ""
-    seats_raw: str = ""
-    quota: Optional[int] = None      # 限数
-    selected: Optional[int] = None   # 已选
-    avail: int = -1                  # 空余 = 限数 - 已选；-1 表示未知
-    status: str = ""                 # 选课状态：可申请 / 不可申请 / 已选上 / (空)
-    seq: str = ""                    # 课程稳定 id（course_seq_no）
-    links: dict = field(default_factory=dict)
-    page: int = 0                    # 在选课网列表中的页码（1 起）
-
-    @property
-    def has_seats(self) -> bool:
-        return self.avail > 0
-
-    @property
-    def key(self) -> str:
-        return self.seq or f"{self.course_no}#{self.class_no}"
-
-
-@dataclass
-class FetchResult:
-    courses: list[Course] = field(default_factory=list)
-    pages: int = 0
-    login_mode: str = ""          # login_click / sso_auto
-    ok: bool = True
-    error: str = ""
-    warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
-
-
-# ---------------------------------------------------------------------------
-# 提取 JS（只读；返回 JSON 字符串）
-# ---------------------------------------------------------------------------
-
-_EXTRACT_JS = r"""
-(() => {
-  const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
-  const isHeader = cs => cs.some(c => c.includes('课程号'))
-      && cs.some(c => c.includes('课程名'))
-      && cs.some(c => c.includes('限数'));
-  function parseTable(tbl) {
-    const rows = [...tbl.querySelectorAll('tr')];
-    let hi = -1, header = [];
-    for (let i = 0; i < rows.length; i++) {
-      const cs = [...rows[i].querySelectorAll('th,td')].map(c => norm(c.textContent));
-      if (isHeader(cs)) { hi = i; header = cs; break; }
-    }
-    if (hi < 0) return null;
-    const data = [];
-    for (let i = hi + 1; i < rows.length; i++) {
-      const tds = [...rows[i].querySelectorAll('td')];
-      if (!tds.length) continue;
-      const cells = tds.map(c => norm(c.textContent));
-      if (cells.every(c => c === '')) continue;
-      const links = [...rows[i].querySelectorAll('a')]
-        .map(a => ({ t: norm(a.textContent), h: a.getAttribute('href') || '' }))
-        .filter(l => l.t || l.h);
-      data.push({ cells, links });
-    }
-    return { header, rows: data };
-  }
-  const rawTables = [...document.querySelectorAll('table')];
-  const next = [...document.querySelectorAll('a')].find(a => norm(a.textContent) === 'Next');
-  const tables = rawTables
-    .map(el => { const p = parseTable(el); return p ? { el, ...p } : null; })
-    .filter(Boolean);
-  const body = document.body.innerText || '';
-  const pm = body.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
-  return JSON.stringify({
-    url: location.href,
-    pager: pm ? { cur: +pm[1], total: +pm[2] } : null,
-    has_next: !!next,
-    next_href: next ? next.getAttribute('href') : null,
-    // 仅当页面连课程表都没有时才判定风控/警告（选课页常驻"请勿使用刷课机"
-    // 警示条，不能因为静态文案就误报）
-    warning: tables.length === 0 && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body),
-    tables: tables.map(({ el, ...rest }) => ({ ...rest,
-                                               pager_here: next ? el.contains(next) : false }))
-  });
-})()
-"""
 
 
 class Progress:
@@ -161,145 +56,13 @@ class Progress:
 
 
 # ---------------------------------------------------------------------------
-# 页面解析
+# 页面在位检测 / 等待
 # ---------------------------------------------------------------------------
-
-def _col(header: list[str], *keys: str) -> Optional[int]:
-    for i, h in enumerate(header):
-        if any(k in h for k in keys):
-            return i
-    return None
-
-
-def _parse_course(header: list[str], cells: list[str], links: list[dict]) -> Course:
-    c = Course()
-    i_no = _col(header, "课程号")
-    i_name = _col(header, "课程名")
-    i_cat = _col(header, "课程类别")
-    i_credit = _col(header, "学分")
-    i_hours = _col(header, "周学时")
-    i_teacher = _col(header, "教师")
-    i_class = _col(header, "班号")
-    i_dept = _col(header, "开课单位")
-    i_grade = _col(header, "年级")
-    i_sched = _col(header, "上课", "考试")
-    i_pnp = _col(header, "P/NP")
-    i_seats = _col(header, "限数")
-    i_status = _col(header, "选课状态")
-
-    def cell(i: Optional[int]) -> str:
-        return cells[i] if i is not None and i < len(cells) else ""
-
-    c.course_no, c.name = cell(i_no), cell(i_name)
-    c.category, c.credits, c.weekly_hours = cell(i_cat), cell(i_credit), cell(i_hours)
-    c.teacher, c.class_no, c.dept, c.grade = cell(i_teacher), cell(i_class), cell(i_dept), cell(i_grade)
-    c.schedule, c.pnp = cell(i_sched), cell(i_pnp)
-    c.seats_raw = cell(i_seats)
-    m = _SEATS_RE.search(c.seats_raw)
-    if m:
-        c.quota, c.selected = int(m.group(1)), int(m.group(2))
-        c.avail = c.quota - c.selected
-    c.status = cell(i_status)
-
-    for l in links:
-        h = l["h"] or ""
-        if "goNested.do" in h:
-            c.links["detail"] = h
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(h).query)
-            if "course_seq_no" in q:
-                c.seq = urllib.parse.unquote(q["course_seq_no"][0])
-        elif "electSupplement.do" in h:
-            c.links.setdefault("elect", []).append(h)   # 补选/刷新入口；监控时绝不点击
-        elif "cancelCourse.do" in h:
-            c.links["drop"] = h                          # 退选入口；同样只记录
-    if not c.status and "elect" in c.links:
-        c.status = "可申请" if c.links.get("elect_text") == "补选" else ""
-    # 有些行以链接文本表达可申请/不可申请
-    for l in links:
-        if l["t"] in ("补选", "刷新") and "electSupplement.do" in (l["h"] or ""):
-            c.status = c.status or ("可申请" if l["t"] == "补选" else "不可申请")
-    return c
-
-
-def _pick_electable_table(tables: list[dict]) -> Optional[dict]:
-    """挑出真正的「补退选可用列表」表格。
-
-    页面可能同时出现：外层包裹表（表头长度异常）、已选上列表、可用列表。
-    判定依据（由强到弱）：
-    1. 表头长度在 10~16 之间（排除把整页包进去的畸形表）；
-    2. 该表内包含翻页用的 Next 链接（分页只属于可用列表）；
-    3. 含 electSupplement.do（补选/刷新）链接的行数最多。
-    """
-    sane = [t for t in tables if 10 <= len(t.get("header") or []) <= 16]
-    if not sane:
-        sane = tables
-    for t in sane:
-        if t.get("pager_here"):
-            return t
-    best, best_score = None, -1
-    for t in sane:
-        score = sum(
-            1 for r in (t.get("rows") or [])
-            if any("electSupplement" in (l.get("h") or "") for l in (r.get("links") or []))
-        )
-        if score > best_score:
-            best, best_score = t, score
-    return best if best_score > 0 else (sane[0] if sane else None)
-
-
-def _sig(page_courses: list[Course]) -> str:
-    """本页课程签名（用于翻页是否生效的判重）。"""
-    head = page_courses[:3]
-    return "|".join(c.key for c in head) + f"#{len(page_courses)}"
-
-
-def _parse_page(data: dict) -> tuple[list[Course], dict, bool]:
-    """返回 (可用课程列表, 分页信息, 页面是否含风控提示语)。"""
-    courses: list[Course] = []
-    t = _pick_electable_table(data.get("tables") or [])
-    if t is not None:
-        header, rows = t.get("header") or [], t.get("rows") or []
-        for r in rows:
-            courses.append(_parse_course(header, r.get("cells") or [], r.get("links") or []))
-    pager = data.get("pager") or {}
-    return (courses,
-            {"has_next": bool(data.get("has_next")),
-             "next_href": data.get("next_href"),
-             "cur": (pager or {}).get("cur"),
-             "total": (pager or {}).get("total")},
-            bool(data.get("warning")))
-
-
-def _absolute(href: str) -> str:
-    return href if href.startswith("http") else ELECTIVE_BASE + href
-
-
-def _poll_url(session: str, needle: str, timeout_s: float = 30.0,
-              log: Optional[Callable[[str], None]] = None) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            if needle in oc.get_url(session):
-                return True
-        except Exception:
-            pass
-        sleep_rand(1.5, 2.5)
-    return False
-
-
-_TABLE_READY_JS = (
-    r"(() => { const tb = [...document.querySelectorAll('table')]; "
-    r"for (const t of tb) { const cs = [...t.querySelectorAll('th,td')]"
-    r".map(c => (c.textContent || '').trim()); "
-    r"if (cs.some(x => x.includes('课程号')) && cs.some(x => x.includes('限数'))) "
-    r"return true; } return false; })()"
-)
-
 
 def _table_ready(session: str) -> bool:
     """课程表是否已渲染出来（页面加载未完成时抓取会拿到空数据）。"""
     try:
-        return oc.eval_js(session, _TABLE_READY_JS) is True
+        return oc.eval_js(session, TABLE_READY_JS) is True
     except Exception:
         return False
 
@@ -314,10 +77,6 @@ def _wait_table(session: str, timeout_s: float = 20.0,
         sleep_rand(0.5, 1.0)
     return False
 
-
-# ---------------------------------------------------------------------------
-# 登录
-# ---------------------------------------------------------------------------
 
 def _on_workable_page(session: str) -> bool:
     """确认已登录且进入可用页面：出现补退选菜单链接，或已在补退选页。"""
@@ -340,6 +99,10 @@ def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
             return True
     return False
 
+
+# ---------------------------------------------------------------------------
+# 登录
+# ---------------------------------------------------------------------------
 
 def _form_present(session: str) -> bool:
     """登录表单是否在位（#logon_button 存在）。页面重定向进行中时可能短暂缺失。"""
@@ -544,7 +307,7 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
             + ("，点登录时表单已被重定向走" if not clicked else ""))
         sleep_rand(3.0, 5.0)
 
-    # 失败现场收集（会经 watcher 写入 data/courser.log）
+    # 失败现场收集（会经 runner 写入 data/courser.log）
     try:
         url_now = oc.get_url(session)
         form_ok = _form_present(session)
@@ -654,16 +417,16 @@ def walk_pages(session: str, window: Optional[str] = None,
                 meta["finished"] = True
                 break
 
-        data = oc.eval_js(session, _EXTRACT_JS)
+        data = oc.eval_js(session, EXTRACT_JS)
         if not isinstance(data, dict):
             raise FetchError("页面提取失败：eval 未返回 JSON")
-        page_courses, pager, warned = _parse_page(data)
+        page_courses, pager, warned = parser.parse_page(data)
         # 有表但解析出 0 门：可能仍在渲染/网络慢，重取一次
         if not page_courses and data.get("tables"):
             sleep_rand(1.5, 2.5)
-            data = oc.eval_js(session, _EXTRACT_JS)
+            data = oc.eval_js(session, EXTRACT_JS)
             if isinstance(data, dict):
-                page_courses, pager, warned = _parse_page(data)
+                page_courses, pager, warned = parser.parse_page(data)
         if prog is not None:
             tot = (pager.get("total") if pager.get("total") else None) or None
             if prog.total is None and tot:
@@ -679,12 +442,12 @@ def walk_pages(session: str, window: Optional[str] = None,
         pages += 1
 
         # 同页重复护栏：翻页点击失败时可能停在原页，连续两页内容完全一样就停
-        if pages >= 2 and page_courses and prev_signature == _sig(page_courses):
+        if pages >= 2 and page_courses and prev_signature == parser._sig(page_courses):
             if log:
                 log("检测到重复页（翻页未生效），本轮提前结束")
             meta["finished"] = True
             break
-        prev_signature = _sig(page_courses) if page_courses else prev_signature
+        prev_signature = parser._sig(page_courses) if page_courses else prev_signature
 
         if log:
             log(f"第 {pages} 页：{len(page_courses)} 门课（累计 {len(courses)}）")
@@ -726,7 +489,7 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
                 force_logout: bool = True,
                 log: Optional[Callable[[str], None]] = None,
                 on_progress: Optional[Callable[[int, Optional[int], str], None]] = None) -> FetchResult:
-    """完整一轮：登录 → 补退选 → 翻页抓取。
+    """完整一轮抓取：登录 → 补退选 → 翻页抓取。
 
     on_progress(done, total, op)：实时报告抓取进度与当前操作（total 未知前为 None）。
     """
