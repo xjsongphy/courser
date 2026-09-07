@@ -214,11 +214,15 @@ class CourserApp(App):
         self.view = "all"
         self.c_idx = 0
         self.c_top = 0
+        # 抓取进度（本轮步骤/总数/当前操作）
+        self._prog_done: Optional[int] = None
+        self._prog_total: Optional[int] = None
+        self._prog_op = ""
         # 筛选页状态
         self.f_dim = 0
         self.f_idx = 0
         self.f_top = 0
-        self.f_query = ""              # pi 式顶部输入即筛
+        self.f_query = ""              # 顶部输入即筛
         self.auto_gather = True        # 无最近结果时进入筛选页自动抓一轮生成候选
         self._gathering = False
         # settings draft 与行索引
@@ -475,7 +479,7 @@ class CourserApp(App):
         self._show("main")
         self._render_status_ticker()
         if not self.cfg.first_run_done:
-            self.log_line("首次使用：请先完成配置（gws 授权 + 收件邮箱）")
+            self.log_line("首次使用：请先完成收件邮箱与 gws 授权设置")
             self._show("setup")
 
     def on_resize(self, event: events.Resize) -> None:
@@ -499,7 +503,8 @@ class CourserApp(App):
         "logs": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
         "help": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
         "detail": "[cyan]Esc[/] 返回主页",
-        "setup": "[cyan]↑↓[/] 选择 · [cyan]回车[/] 编辑/继续 · [cyan]Esc[/] 退出程序",
+        "setup": "[cyan]↓[/] 编辑收件邮箱 · [cyan]回车[/] 继续 · "
+                 "[cyan]Esc[/] 退出程序",
     }
 
     def _page_ids(self):
@@ -714,13 +719,13 @@ class CourserApp(App):
                 return
             if self.f_query:
                 listw.update(
-                    f"[dim]没有匹配「{escape(self.f_query)}」的候选。"
-                    f"清空输入浏览全部；确实要加的条目按 i 手动添加。[/]")
+                    f"[dim]没有匹配「{escape(self.f_query)}」的条目。"
+                    f"按回车可把它添加为当前维度的筛选条件。[/]")
             else:
                 listw.update(
-                    "[dim]本维度暂无候选。\n"
-                    "  候选取自最近一次抓取结果；还没有结果时，进入本页会自动抓一轮。\n"
-                    "  仍无匹配，可按 i 手动添加一条。[/]")
+                    "[dim]本维度暂无可选条目。\n"
+                    "  候选取自最近一次抓取结果；若还没有抓取结果，进入本页时会自动抓一轮。\n"
+                    "  仍无条目时，可在搜索框输入后按回车，将其添加为筛选条件。[/]")
             return
         if self.f_idx >= len(items):
             self.f_idx = len(items) - 1
@@ -736,7 +741,7 @@ class CourserApp(App):
             idx = self.f_top + i
             cur = "[cyan]❯[/]" if idx == self.f_idx else " "
             mark = "[cyan]✓[/]" if it in entries else " "
-            extra = " [dim](自定义)[/]" if it not in cands else ""
+            extra = " [dim](手动添加)[/]" if it not in cands else ""
             out.append(f"{cur} {mark} {escape(it)}{extra}")
         listw.update("\n".join(out))
 
@@ -956,28 +961,28 @@ class CourserApp(App):
         body = self.query_one("#setupbody", Static)
         gws = notifier.gws_available()
         has_recip = bool(self.cfg.notify.to)
-        lines = ["[bold]首次使用 — 配置课程监控[/]\n",
-                 "先检查运行环境（opencli 驱动 Chrome、gws 发送邮件）："]
+        lines = ["[bold]首次使用 — 配置课程监控[/]\n", "运行环境："]
         opencli = shutil.which("opencli")
         lines.append("  " + ("[green]✓[/] opencli 已安装"
-                             if opencli else "[yellow]⚠ opencli 未找到（需先安装）[/]"))
+                             if opencli else "[red]✗[/] opencli 未安装（请先安装并运行 opencli doctor）"))
         lines.append("  " + ("[green]✓[/] gws 已安装"
-                             if gws else "[yellow]⚠ gws 未安装（brew install gws）[/]"))
-        lines.append("  " + ("[yellow]⚠ gws 尚未完成授权（执行 gws auth login）[/]"
-                             if gws else "[dim]（安装 gws 后执行 gws auth login）[/]"))
+                             if gws else "[red]✗[/] gws 未安装（brew install gws）"))
+        if gws:
+            lines.append("  [yellow]⚠[/] gws 尚未授权——请先在命令行执行 gws auth login")
         lines.append("")
-        lines.append("[bold]收件邮箱[/]（必填，用于接收提醒）")
-        lines.append("  " + ("[green]✓ 已填[/]  " + escape(self.cfg.notify.to)
-                             if has_recip else "[yellow]未填写[/]（↓ 选择后用回车输入）"))
+        lines.append("[bold]收件邮箱[/]（用于接收提醒，必填）")
+        if has_recip:
+            lines.append("  [green]✓[/] " + escape(self.cfg.notify.to))
+        else:
+            lines.append("  [yellow]未填写[/]")
         lines.append("")
-        lines.append("学号 / 密码可留空：登录时依赖浏览器密码管理器自动填充。")
-        lines.append("  [dim]按 s 打开设置 →「账号凭据」填写[/]")
+        lines.append("学号 / 密码可留空：登录时由浏览器密码管理器自动填充。")
+        lines.append("也可稍后在主页按 s，在「设置 → 账号凭据」中补充。")
         lines.append("")
         if has_recip:
-            lines.append("[green]✓ 邮件通知已就绪[/]  回车开始使用；Esc 退出程序")
+            lines.append("[green]收件邮箱已配置，可以开始使用。[/]")
         else:
-            lines.append("[yellow]请先填写收件邮箱[/] 回车继续会提醒")
-        lines.append("\n[dim]设置完成后可随时按 1 开始监控。[/]")
+            lines.append("[yellow]请先填写收件邮箱。[/]")
         body.update("\n".join(lines))
 
     # ------------------------------------------------------------------
@@ -1008,6 +1013,38 @@ class CourserApp(App):
     def _reset_runstate_interval(self) -> None:
         pass
 
+    # ------------------------------------------------------------------
+    # 抓取进度（本轮步骤 + 当前操作实时提示）
+    # ------------------------------------------------------------------
+    def _thread_progress(self, done, total, op):
+        self.call_from_thread(self._set_progress, done, total, op)
+
+    def _set_progress(self, done, total, op):
+        self._prog_done, self._prog_total, self._prog_op = done, total, op
+        try:
+            self._render_progress()
+        except Exception:
+            pass
+
+    def _render_progress(self) -> None:
+        if self.page != "main":
+            return
+        try:
+            el = self.query_one("#progress", Static)
+        except Exception:
+            return
+        done, total, op = self._prog_done, self._prog_total, self._prog_op
+        if done is None:
+            el.update("")
+            return
+        W = max(8, min(28, max(10, self.size.width - 64)))
+        bar = ""
+        if total:
+            filled = int(W * max(0, min(1.0, done / total)))
+            bar = "[cyan]" + "█" * filled + "[/][dim]" + "░" * (W - filled) + "[/] "
+        frac = f"{done}/{total}" if total else str(done)
+        el.update(f"[bold]抓取 {frac} 步[/] {bar}[dim]· 当前：{escape(op)}[/]")
+
     def _render_runstate(self) -> None:
         w = self.watcher
         run = "[bold green]● 监控中[/]" if (w and w.running) else "[dim]未开始[/]"
@@ -1025,8 +1062,10 @@ class CourserApp(App):
     def _tick(self) -> None:
         self._render_runstate()
         if self.page == "main":
-            # 每轮概要里 上一轮/风控 无需秒级刷新，运行行已刷新即可
-            pass
+            try:
+                self._render_progress()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 键盘路由
@@ -1139,7 +1178,7 @@ class CourserApp(App):
             lst.append(value)
             if value not in self.candidate_lists[gid]:
                 self.candidate_lists[gid].append(value)
-            self.log_line(f"已添加自定义筛选：{value}（回车保存后生效）")
+            self.log_line(f"已添加筛选条目：{value}")
 
     def _main_key(self, k: str, event: events.Key) -> None:
         if k in ("space",):
@@ -1287,7 +1326,7 @@ class CourserApp(App):
         if w is None:
             return
         if not self.cfg.first_run_done:
-            self.log_line("首次使用请先完成配置（gws 授权 + 收件邮箱）")
+            self.log_line("请先完成收件邮箱与 gws 授权设置")
             self._show("setup")
             return
         if w.running:
@@ -1309,6 +1348,9 @@ class CourserApp(App):
         self.call_from_thread(self._apply_round, r)
 
     def _apply_round(self, r: RoundResult) -> None:
+        # 本轮结束：清掉进行中的进度，避免残留"正在读取…"
+        self._prog_done = self._prog_total = None
+        self._prog_op = "本轮完成"
         if r.ok and r.courses:
             self.courses = r.courses
             self._save_snapshot(r)
@@ -1319,6 +1361,10 @@ class CourserApp(App):
         elif self.page == "filters":
             self._render_filters_list()
         self._render_runstate()
+        try:
+            self._render_progress()
+        except Exception:
+            pass
         if r.notified:
             names = "、".join(c.name for c in r.notified)
             self.log_line(f"[green]已发送提醒邮件：{names}[/]")
