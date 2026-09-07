@@ -23,6 +23,7 @@ import argparse
 import copy
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -184,6 +185,22 @@ def _field_mutate(cfg: Config, key: str, value: str) -> None:
         setattr(cfg, key, float(value))
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """把纯文本写入系统剪贴板（macOS pbcopy / Linux xclip|xsel）。"""
+    data = (text or "").encode("utf-8")
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=data, check=True)
+            return True
+        for tool in ("xclip", "xsel"):
+            if shutil.which(tool):
+                subprocess.run([tool], input=data, check=True)
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _risk_text(percent: int, label: str) -> str:
     color = {"高": "red", "极高": "red", "中": "yellow",
              "已触发/疑似": "red"}.get(label, "yellow")
@@ -223,7 +240,7 @@ class CourserApp(App):
         self.f_idx = 0
         self.f_top = 0
         self.f_query = ""              # 顶部输入即筛
-        self.auto_gather = True        # 无最近结果时进入筛选页自动抓一轮生成候选
+        self.auto_gather = False       # 进筛选页不再自动抓取生成候选（用缓存/手动抓）
         self._gathering = False
         # settings draft 与行索引
         self.sd: dict[str, str] = {}
@@ -353,6 +370,31 @@ class CourserApp(App):
         else:
             color = "default"
         return f"[{color}]{escape(body)}[/]"
+
+    # ------------------------------------------------------------------
+    # 复制（yank）当前课程 / 文字到系统剪贴板
+    # ------------------------------------------------------------------
+    def _copy_text(self, text: str, label: str = "") -> None:
+        ok = _copy_to_clipboard(text)
+        head = label or (text or "").splitlines()[0][:40] if text else ""
+        self.log_line(("已复制" + ("：" + head if head else "")) if ok
+                      else "复制失败（本机缺少 pbcopy / xclip）")
+
+    def _copy_current_course(self) -> None:
+        rows = self._visible_rows()
+        if not rows or not (0 <= self.c_idx < len(rows)):
+            self.log_line("没有可复制的课程（列表为空）")
+            return
+        c = rows[self.c_idx]
+        seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
+        lines = [
+            f"{c.name} [{c.course_no}]（第 {c.page or '—'} 页）",
+            f"课程类别：{c.category}    开课单位：{c.dept}",
+            f"教师：{c.teacher}    班号：{c.class_no or '—'}",
+            f"限数/已选：{seats}    空余：{c.avail}    状态：{c.status or '—'}",
+            f"上课/考试信息：{c.schedule}",
+        ]
+        self._copy_text("\n".join(lines), label=f"{c.name} [{c.course_no}]")
 
     # ------------------------------------------------------------------
     # 课程行 / 自适应列
@@ -494,15 +536,15 @@ class CourserApp(App):
         "main": "[cyan]空格[/] 开始/停止 · [cyan]r[/] 立即抓取 · "
                 "[cyan]1/2/3[/] 全部/筛选/空余 · [cyan]f[/] 筛选 · "
                 "[cyan]s[/] 设置 · [cyan]l[/] 日志 · [cyan]h[/] 帮助 · "
-                "[cyan]q[/] 退出",
+                "[cyan]y[/] 复制当前课程 · [cyan]q[/] 退出",
         "filters": "[cyan]输入过滤[/] · [cyan]↑↓[/] 选择 · [cyan]空格[/] 选中/取消 · "
                    "[cyan]回车[/] 确认 · [cyan]Tab[/] 维度 · "
                    "[cyan]Esc[/] 放弃并返回",
         "settings": "[cyan]↑↓[/] 选择 · [cyan]←/→[/] 切换选项 · [cyan]回车[/] 编辑 · "
                     "[cyan]t[/] 测试邮件 · [cyan]ctrl+s[/] 保存 · [cyan]Esc[/] 放弃",
-        "logs": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
+        "logs": "[cyan]↑↓[/] 滚动 · [cyan]y[/] 复制最近日志 · [cyan]Esc[/] 返回主页",
         "help": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
-        "detail": "[cyan]Esc[/] 返回主页",
+        "detail": "[cyan]y[/] 复制 · [cyan]Esc[/] 返回主页",
         "setup": "[cyan]↓[/] 编辑收件邮箱 · [cyan]回车[/] 继续 · "
                  "[cyan]Esc[/] 退出程序",
     }
@@ -724,8 +766,8 @@ class CourserApp(App):
             else:
                 listw.update(
                     "[dim]本维度暂无可选条目。\n"
-                    "  候选取自最近一次抓取结果；若还没有抓取结果，进入本页时会自动抓一轮。\n"
-                    "  仍无条目时，可在搜索框输入后按回车，将其添加为筛选条件。[/]")
+                    "  候选取自最近一次抓取结果（不再每次进入都自动抓取）。\n"
+                    "  还没有结果时：在主页按 [cyan]r[/] 抓一轮后再回来，或在搜索框输入后按回车添加。[/]")
             return
         if self.f_idx >= len(items):
             self.f_idx = len(items) - 1
@@ -1104,6 +1146,12 @@ class CourserApp(App):
             if k == "escape":
                 event.stop()
                 self._show("main", force=True)
+            elif k == "y" and page == "logs":
+                event.stop()
+                self._copy_text("\n".join(self.log_buf[-60:]))
+            elif k == "y" and page == "detail":
+                event.stop()
+                self._copy_current_course()
             return
         # main
         if page == "main":
@@ -1220,6 +1268,9 @@ class CourserApp(App):
         elif k == "enter":
             event.stop()
             self._open_detail()
+        elif k == "y":
+            event.stop()
+            self._copy_current_course()
 
     def _move_cursor(self, step: int) -> None:
         rows = self._visible_rows()
