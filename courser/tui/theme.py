@@ -18,9 +18,17 @@ from ..config import Config
 
 SEP = "[dim] · [/]"  # 行内弱分隔符，自动退到背景
 
+# Courser 统一强调色（identity / interaction）：暗色终端下不刺眼的蓝。
+# 只表示品牌 + 交互焦点；成功/警告/错误等语义色不染蓝。
+ACCENT = "#58A6FF"
+
+
+def ui_accent(text: str) -> str:
+    return f"[{ACCENT}]{escape(text)}[/]"
+
 
 def ui_title(text: str) -> str:
-    return f"[bold cyan]{escape(text)}[/]"
+    return f"[bold {ACCENT}]{escape(text)}[/]"
 
 
 def ui_section(text: str) -> str:
@@ -40,7 +48,7 @@ def ui_meta(text: str) -> str:
 
 
 def ui_key(text: str) -> str:
-    return f"[cyan]{escape(text)}[/]"
+    return f"[{ACCENT}]{escape(text)}[/]"
 
 
 def ui_ok(text: str) -> str:
@@ -119,13 +127,14 @@ Screen { background: transparent; }
 Vertical, VerticalScroll, Static { background: transparent; }
 VerticalScroll:focus { border: none; }
 
-#brand { height: 1; padding: 0 4; }
+/* 主页顶部产品身份 + 稳定摘要（Hero）：Rich Panel 负责边框，Textual 只管安排位置。 */
+/* brand 不再兼任键盘焦点锚（_anchor_focus 改为 set_focus(None)）。 */
+#hero { height: auto; padding: 0 2; margin-bottom: 1; }
 #stage { height: 1fr; min-height: 0; padding: 0 2; }
 
 /* 主页 */
 #page-main { height: 1fr; min-height: 0; padding: 0 2; border: none;
              overflow: hidden; }
-#summary { height: auto; }
 #courselist { height: 1fr; min-height: 1; overflow: hidden; }
 #coursehead { height: auto; }
 

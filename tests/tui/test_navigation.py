@@ -68,8 +68,52 @@ def _fake(app) -> None:
     app.main.snapshot_meta = "2 页 · 2 门课程"
 
 
+async def _search_courses():
+    """查找测试用课程：近独立 5 门 + 其它。"""
+    base = [Course(course_no="001", name="近代物理实验", category="专业必修",
+                   dept="物理学院", quota=30, selected=0, avail=1,
+                   seq=f"s{i}", page=1) for i in range(5)]
+    base.append(Course(course_no="002", name="英语写作", category="通识课(通选课I)",
+                       dept="外国语学院", quota=50, selected=0, avail=1,
+                       seq="s9", page=2))
+    return base
+
+
+async def test_search_browse():
+    """查找：仅 4 列可检；编辑态下也能浏览结果列表（↑↓/PgUp/PgDn）。"""
+    cfg = Config.load()
+    cfg.first_run_done = True
+    cfg.notify.to = "x@y.z"
+    app = CourserApp(cfg)
+    async with app.run_test(size=(120, 36)) as p:
+        await p.pause(0.3)
+        app.courses = await _search_courses()
+        app._render_main(force=True)
+        # 只允许在 课程号/课程名/课程类别/开课院系 里查找
+        assert [k for k, _ in app._search_cols()] == ["no", "name", "cat", "dept"]
+        await p.press("/")
+        await p.pause(0.1)
+        assert app.editing.context == "search" and app.main.search_col == "name"
+        # 输入即筛，且编辑态下能浏览结果
+        app.editor.begin("近代", "text")
+        app._render_main(force=True)
+        rows = app._visible_rows()
+        assert len(rows) == 5, f"输入即筛应收窄，实得 {len(rows)}"
+        i0 = app.main.index
+        await p.press("down")
+        await p.pause(0.05)
+        assert app.editing.context == "search", "编辑态应保持"
+        assert app.main.index == min(i0 + 1, len(rows) - 1), "↓ 应浏览结果列表"
+        # Esc 退出整个查找
+        await p.press("escape")
+        await p.pause(0.05)
+        assert app.main.search_col is None and app.editing.context is None
+    print("✓ 查找仅4列·编辑态可浏览结果·Esc退出")
+
+
 async def main() -> int:
     test_main_hint_data_aware()
+    await test_search_browse()
     # ---- 首启设置：填邮箱 → 就绪 → 主页 ----
     cfg = Config.load()
     cfg.first_run_done = False

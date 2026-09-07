@@ -24,6 +24,9 @@ from math import ceil
 from typing import Optional
 
 from rich.cells import cell_len
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -39,11 +42,12 @@ from ..scheduler import MonitorScheduler
 from ..storage import SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
-from .theme import (COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
+from .theme import (ACCENT, COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
                     FocusScroll, FocusableStatic, _hint, _pad,
                     field_mutate, field_value, kv_row, page_hint, plain_markup,
-                    risk_markup, shortcut_row, ui_error, ui_key, ui_label,
-                    ui_meta, ui_ok, ui_section, ui_title, ui_value, ui_warn)
+                    risk_markup, shortcut_row, ui_accent, ui_error, ui_key,
+                    ui_label, ui_meta, ui_ok, ui_section, ui_title, ui_value,
+                    ui_warn)
 
 # 为兼容旧内部命名（保持渲染/按键逻辑可读性，缩写映射到 theme/state 的统一实现）
 _risk_markup = risk_markup
@@ -57,7 +61,6 @@ _field_mutate = field_mutate
 # 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
 _ACTIVITY_PAGES = {"main", "filters", "logs", "detail"}
 
-
 def _compact_dt(dt: datetime) -> str:
     """把时间压成随年龄递减的紧凑格式：今天 HH:MM；昨天 "昨天 HH:MM"；
     更久 "MM-DD HH:MM"；跨年 "YYYY-MM-DD HH:MM"。完整时间戳留给日志页。"""
@@ -69,7 +72,6 @@ def _compact_dt(dt: datetime) -> str:
     if dt.year == now.year:
         return dt.strftime("%m-%d %H:%M")
     return dt.strftime("%Y-%m-%d %H:%M")
-
 
 class CourserApp(App):
     """纯文本菜单 TUI：主页面 + 筛选/设置/日志/帮助/详情/首启设置。"""
@@ -170,7 +172,7 @@ class CourserApp(App):
             return ui_warn("gws 未安装")
         if not self.cfg.notify.to:
             return ui_warn("收件邮箱未填写")
-        return ui_ok("✓ 已就绪")
+        return ui_ok("已配置")
 
     def _google_markup(self) -> str:
         """按最近一次发信结果展示 Google/邮件连通性。"""
@@ -196,35 +198,6 @@ class CourserApp(App):
             return ui_meta("gmail")
         return ui_ok("gmail") if ok else ui_error("gmail")
 
-    def _labeled(self, label: str, content: str) -> str:
-        """主页 summary 的一行：左侧 label 退后并对齐，右侧 content 自带排版。"""
-        # 这是 dashboard 的字段标题，不是辅助说明；不能和右侧 meta 一起 dim。
-        return f"{ui_section(_pad(label, 6))}  {content}"
-
-    def _monitor_summary(self) -> list[str]:
-        w = self.watcher
-        lines = []
-        # 运行状态与上一轮结果由底部固定 runstate 统一展示；这里仅保留
-        # 主页上下文（筛选 / 通知 / 风控），避免同一状态在上下两处重复。
-        fs = self.cfg.filters
-        if fs.empty:
-            lines.append(self._labeled(
-                "筛选", ui_meta("未配置（不会告警）")))
-        else:
-            group_txt = SEP.join(
-                f"{ui_value(n)}×{len(v)}" for n, v in fs.active_groups)
-            mode = "任一" if fs.match != "all" else "全部"
-            lines.append(self._labeled(
-                "筛选", f"{group_txt}  {ui_meta('满足' + mode + '条件')}"))
-        lines.append(self._labeled("通知", self._mail_markup()))
-        if w and w.last_result:
-            risk = _risk_markup(w.last_result.risk_percent,
-                                w.last_result.risk_label)
-            if risk:
-                lines.append(self._labeled("风控", risk))
-        return lines
-
-
     # ------------------------------------------------------------------
     # 课程行 / 自适应列
     # ------------------------------------------------------------------
@@ -244,9 +217,9 @@ class CourserApp(App):
 
     # -- 主页按列查找（1/2/3 三个视图通用，不分工况）---------------------
     def _search_cols(self) -> list[tuple[str, str]]:
-        """当前可见列（含中文标签）；查找列只能在这些列里选，
-        保证被查找列的列名始终高亮可见。"""
-        return [(k, l) for k, l, _w in self._columns(max(40, self.size.width - 4))]
+        """查找只能在可检索列进行：课程号 / 课程名 / 课程类别 / 开课院系。"""
+        return [("no", "课程号"), ("name", "课程名"),
+                ("cat", "课程类别"), ("dept", "开课院系")]
 
     def _search_col_label(self) -> str:
         for k, l in self._search_cols():
@@ -299,8 +272,8 @@ class CourserApp(App):
         """主页底部只显示当前状态下真正可用的操作。"""
         if self.editing.context == "search":
             return _hint(
-                ("Tab", "换列"), ("Enter", "确认查找"),
-                ("Esc", "退出查找"),
+                ("↑↓ / PgUp / PgDn", "浏览结果"), ("Tab", "换列"),
+                ("Enter", "确认查找"), ("Esc", "退出查找"),
             )
         if self.main.search_col:
             return _hint(
@@ -375,15 +348,26 @@ class CourserApp(App):
     def _table_width(self, cols) -> int:
         return 3 + sum(width for _key, _label, width in cols) + len(cols) - 1
 
+    _RIGHT = {"page", "seats", "avail"}   # 数量型列右对齐；ID/名称左对齐
+
+    def _col_justify(self, key: str) -> str:
+        return "right" if key in self._RIGHT else "left"
+
+    def _seat_display(self, c: Course) -> str:
+        """限/已选：规范化成紧凑右对齐的 `30/12`；无配额则回退原始串。"""
+        if c.quota is not None and c.selected is not None:
+            return f"{c.selected}/{c.quota}"
+        raw = (c.seats_raw or "").replace(" ", "")
+        return raw or "—"
+
     def _header_labels(self, cols, indent: int = 0) -> str:
-        centered = {"page", "cat", "seats", "avail"}
         cells = []
         for key, label, width in cols:
-            justify = "center" if key in centered else "left"
+            justify = self._col_justify(key)
             cell = self._align_cell(label, width, justify)
             # 查找列列名高亮（启动查找后始终可见）；其余保持 section 灰
             if self.main.search_col and key == self.main.search_col:
-                cells.append(f"[bold cyan]{cell}[/]")
+                cells.append(f"[bold {ACCENT}]{cell}[/]")
             else:
                 cells.append(ui_section(cell))
         return " " * indent + "   " + " ".join(cells)
@@ -428,8 +412,7 @@ class CourserApp(App):
             "cat": c.category or "—",
             "dept": c.dept or "—",
             "teacher": c.teacher or "—",
-            "seats": c.seats_raw or (f"{c.selected}/{c.quota}"
-                                      if c.quota is not None else "—"),
+            "seats": self._seat_display(c),
             "avail": "—" if c.avail < 0 else str(c.avail),
         }
         wrapped: dict[str, list[str]] = {}
@@ -437,14 +420,13 @@ class CourserApp(App):
             cell_width = width - 2 if key == "name" and matched else width
             wrapped[key] = self._wrap_text(values[key], cell_width)
         height = max(len(parts) for parts in wrapped.values())
-        centered = {"page", "cat", "seats", "avail"}
         output = []
         for line_no in range(height):
             cells = []
             for key, _label, width in cols:
                 parts = wrapped[key]
                 text = parts[line_no] if line_no < len(parts) else ""
-                justify = "center" if key in centered else "left"
+                justify = self._col_justify(key)
                 if key == "name" and matched:
                     aligned = self._align_cell(text, width - 2, justify)
                     marker = ui_key("★" if line_no == 0 else " ")
@@ -465,11 +447,10 @@ class CourserApp(App):
     # compose / 生命周期
     # ------------------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield FocusableStatic("", id="brand")
+        yield Static("", id="hero", markup=True)
         with Vertical(id="stage"):
-            # 主页
+            # 主页：Hero 顶部稳定摘要 + 课程视图；实时状态在底部 activity。
             with Vertical(id="page-main"):
-                yield Static("", id="summary", markup=True)
                 yield Static("", id="coursehead", markup=True)
                 yield Static("", id="searchinput", markup=True)
                 yield Static("", id="courselist", markup=True)
@@ -533,11 +514,8 @@ class CourserApp(App):
         return ["main", "filters", "settings", "logs", "help", "detail", "setup"]
 
     def _anchor_focus(self) -> None:
-        """把焦点放到顶部惰性锚（不消费任何键），让页面键路由接管。"""
-        try:
-            self.query_one("#brand", FocusableStatic).focus()
-        except Exception:
-            self.set_focus(None)
+        """无输入态键盘交给 App 自己接管；不依赖视觉 header 作焦点锚。"""
+        self.set_focus(None)
 
     def _show(self, page: str, *_a, **_k) -> None:
         self.page = page
@@ -603,32 +581,94 @@ class CourserApp(App):
         if not force and self.page != "main":
             return
         self.query_one("#keys", Static).update(self._main_hint())
-        self.query_one("#brand", Static).update(
-            ui_section("courser") + ui_meta(" — PKU 补退选空余名额监控"))
-        # “课程”与筛选/通知使用同一标签列，选项内容从同一列起始。
-        options = " ".join(
-            [("[bold cyan]1 全部[/]" if self.main.view == "all" else "[dim]1 全部[/]"),
-             ("[bold cyan]2 符合筛选[/]" if self.main.view == "matched" else "[dim]2 符合筛选[/]"),
-             ("[bold cyan]3 只看空余[/]" if self.main.view == "seats" else "[dim]3 只看空余[/]")])
-        self.query_one("#coursehead", Static).update(self._labeled("课程", options))
-
-        summary = "\n".join(self._monitor_summary())
-        self.query_one("#summary", Static).update(summary)
-
+        self._render_hero()
+        self._render_coursehead()
         rows = self._visible_rows()
         # 课程窗口为底部可换行的操作提示和状态栏让出空间。
         hint_width = max(1, self.size.width - 4)
         hint_plain = _plain_markup(self._main_hint())
         hint_lines = sum(max(1, ceil(cell_len(line) / hint_width))
                          for line in hint_plain.splitlines() or [""])
-        # 查找区固定为标题 + “列” + “输入”三行；底部提示另行渲染，
-        # 不再把快捷键挤在查找控件旁边。
+        # 查找区固定为标题 + “列” + “输入”三行；底部提示另行渲染。
         search_extra = 3 if self.main.search_col else 0
         avail_h = max(1, self.size.height - 17 - search_extra
                       - max(0, hint_lines - 1))
         self._render_course_window(rows, avail_h)
         self._render_search_line()
         self.query_one("#keys", Static).update(self._main_hint())
+
+    # -- Hero：产品身份 + 稳定摘要（Rich Panel + Table.grid）-------------
+    VIEWS = [("all", "1 全部"), ("matched", "2 符合筛选"), ("seats", "3 只看空余")]
+
+    def _filter_summary(self) -> str:
+        fs = self.cfg.filters
+        if fs.empty:
+            return ui_meta("未配置（不会告警）")
+        group_txt = SEP.join(
+            f"{ui_value(n)}×{len(v)}" for n, v in fs.active_groups)
+        mode = "任一" if fs.match != "all" else "全部"
+        return f"{group_txt}  {ui_meta('满足' + mode + '条件')}"
+
+    def _last_success(self) -> tuple[str, str]:
+        """(上次成功时间, 数据规模)——稳定的摘要，不随 live activity 漂移。"""
+        ts = self.main.snapshot_ts or ""
+        t = ""
+        try:
+            t = _compact_dt(datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            t = ""
+        return (t, self.main.snapshot_meta or "")
+
+    def _hero_kv_grid(self, rows) -> Table:
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(width=8, justify="left", no_wrap=True, style="dim")
+        grid.add_column(no_wrap=True)
+        for label, value in rows:
+            grid.add_row(label, value)
+        return grid
+
+    def _render_hero(self) -> None:
+        t, meta = self._last_success()
+        left = self._hero_kv_grid([
+            ("筛选", self._filter_summary()),
+            ("通知", self._mail_markup()),
+        ])
+        right = self._hero_kv_grid([
+            ("上次成功", ui_value(t) if t else ui_meta("—")),
+            ("数据", ui_value(meta) if meta else ui_meta("—")),
+        ])
+        if self.size.width >= 100:
+            body = Table.grid(expand=True)
+            body.add_column(ratio=1)
+            body.add_column(width=3)   # 左右两栏之间的分隔列
+            body.add_column(ratio=1)
+            body.add_row(left, Text("│", style=f"dim {ACCENT}"), right)
+        else:
+            # 窄屏自动退化为单栏，不做硬截断
+            body = Table.grid(expand=True)
+            body.add_column(ratio=1)
+            body.add_row(left)
+            body.add_row(right)
+        title = Text()
+        title.append(" courser ", style=f"bold {ACCENT}")
+        title.append("— PKU 补退选空余名额监控 ", style="dim")
+        panel = Panel(body, title=title, title_align="left",
+                      border_style=ACCENT, padding=(0, 1), expand=True)
+        try:
+            self.query_one("#hero", Static).update(panel)
+        except Exception:
+            pass
+
+    def _render_coursehead(self) -> None:
+        head = Text()
+        head.append("课程      ", style="bold")
+        for key, label in self.VIEWS:
+            head.append("   ")
+            if self.main.view == key:
+                head.append(label, style=f"bold {ACCENT}")
+            else:
+                head.append(label, style="dim")
+        self.query_one("#coursehead", Static).update(head)
 
     def _render_main_lite(self) -> None:
         """主页的轻量刷新（只刷底部全局活动状态行），不做整页重排。"""
@@ -659,41 +699,68 @@ class CourserApp(App):
             self.main.top = self.main.index
         if self.main.index >= self.main.top + avail:
             self.main.top = self.main.index - avail + 1
-        W = max(40, body.size.width or self.size.width - 8)
-        cols = self._columns(W)
-        table_width = self._table_width(cols)
-        indent = max(0, (W - table_width) // 2)
-        fs = FilterSet(self.cfg.filters)
-        def build(start: int):
-            rendered = []
-            used = 1  # 表头
-            for i in range(start, len(rows)):
-                course_lines = self._course_lines(
-                    rows[i], fs.matches(rows[i]), cols,
-                    cursor=i == self.main.index, indent=indent)
-                if rendered and used + len(course_lines) > avail:
-                    break
-                rendered.append((i, course_lines))
-                used += len(course_lines)
-            return rendered
-
-        # 光标必须始终出现在当前物理窗口内；长文本折行后按真实行数分页。
+        # 光标必须始终出现在当前可见窗口内；每门课在 Rich Table 里占一行（no_wrap）。
         self.main.top = min(self.main.top, self.main.index)
-        visible = build(self.main.top)
-        while visible and self.main.index not in {i for i, _ in visible} \
-                and self.main.top < self.main.index:
-            self.main.top += 1
-            visible = build(self.main.top)
-
-        lines = [self._header_labels(cols, indent)]
-        for i, course_lines in visible:
-            c = rows[i]
-            lines.extend(course_lines)
+        max_rows = max(1, avail - 1)   # 1 行表头
+        if self.main.index >= self.main.top + max_rows:
+            self.main.top = self.main.index - max_rows + 1
+        if self.main.index < self.main.top:
+            self.main.top = self.main.index
+        window = rows[self.main.top:self.main.top + max_rows]
+        W = max(40, body.size.width or self.size.width - 8)
+        cols = self._columns(W)          # (key, label, width)，决定哪些列可见
+        table = self._build_course_table(window, cols)
         try:
-            body.update("\n".join(lines))
+            body.update(table)
         except Exception:
-            # 兜底：绝不让任意课程文本触发 markup 解析错误而崩掉 TUI，降级为纯文本
-            body.update("\n".join(ui_value(_plain_markup(ln)) for ln in lines))
+            # 兜底：绝不让任意课程文本触发渲染错误而崩掉 TUI
+            body.update("")
+
+    def _build_course_table(self, rows, cols) -> Table:
+        """无框 Rich Table：数量/ID 列固定宽，文本列（课程等）吃掉剩余宽度并省略。"""
+        fs = FilterSet(self.cfg.filters)
+        table = Table(box=None, show_edge=False, show_lines=False,
+                      pad_edge=False, padding=(0, 1))
+        table.add_column("", justify="center", max_width=1, no_wrap=True)
+        for key, label, width in cols:
+            justify = self._col_justify(key)
+            common = dict(justify=justify, no_wrap=True, overflow="ellipsis")
+            if key == "name":
+                table.add_column(label, ratio=3, **common)
+            elif key in ("cat", "dept", "teacher"):
+                table.add_column(label, ratio=2, **common)
+            else:
+                table.add_column(label, width=width, **common)
+        # 表头（查找列列名高亮）
+        hdr = [""]
+        for key, label, _w in cols:
+            hdr.append(Text(label, style=f"bold {ACCENT}")
+                       if key == self.main.search_col else Text(label))
+        table.add_row(*hdr)
+        for i, c in enumerate(rows):
+            matched = fs.matches(c)
+            cells = [Text("❯", style=ACCENT)
+                     if (self.main.top + i) == self.main.index else ""]
+            for key, _l, _w in cols:
+                if key == "page":
+                    cells.append(Text(str(c.page) if c.page else "—"))
+                elif key == "no":
+                    cells.append(Text(c.course_no or "—"))
+                elif key == "name":
+                    cells.append(Text(("★ " if matched else "") + (c.name or "—")))
+                elif key == "cat":
+                    cells.append(Text(c.category or "—"))
+                elif key == "dept":
+                    cells.append(Text(c.dept or "—"))
+                elif key == "teacher":
+                    cells.append(Text(c.teacher or "—"))
+                elif key == "seats":
+                    cells.append(Text(self._seat_display(c)))
+                elif key == "avail":
+                    t = "—" if c.avail < 0 else str(c.avail)
+                    cells.append(Text(t, style="green" if c.has_seats else "dim"))
+            table.add_row(*cells)
+        return table
 
     # ------------------------------------------------------------------
     # 渲染：筛选页
@@ -1196,50 +1263,20 @@ class CourserApp(App):
             pass
 
     def _activity_fetching(self, w) -> str:
-        """抓取过程中：• 状态 抓取中 · 进度 │ 已运行 Xs │ 来源 Google。"""
-        seg = [f"{ui_meta('• 状态')}  {ui_warn('抓取中')}"]
-        # 不显示步数，只显示当前正在做什么（登出/登录/读页/等待等）。
-        if self.prog.op:
-            seg[0] += f" · {ui_value(str(self.prog.op))}"
+        """抓取过程中：抓取中 · 页进度 · 已运行 Xs · 正在做什么 · 来源 Google。"""
+        seg = [ui_warn("抓取中")]
+        if self.prog.total:
+            seg.append(ui_value(f"{self.prog.done or 0} / {self.prog.total} 页"))
         elapsed = time.time() - w.current_round_started_at
-        seg.append(f"{ui_meta('已运行')} {ui_value(f'{elapsed:.0f}s')}")
+        seg.append(ui_value(f"{elapsed:.0f}s"))
+        if self.prog.op:
+            seg.append(ui_value(str(self.prog.op)))
         seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
-    def _last_round_tail(self, w) -> tuple[str, str]:
-        """底部「上一轮 / 最近抓取」字段：(label, value)。
-
-        - 本进程跑过一轮 → 上一轮：<时间> · <页数> · <耗时> · <成功/失败>（ts 取该轮）
-        - 只有持久快照 → 最近抓取：<时间> · <快照概况>（重启后尚未跑），浅色字体
-        """
-        r = w.last_result if w else None
-        if r is not None:
-            t = (_compact_dt(datetime.fromtimestamp(r.ts))
-                 if getattr(r, "ts", None) else None)
-            head = [ui_value(t)] if t else []
-            if r.ok:
-                parts = head + [ui_value(f"{r.pages} 页 / {r.total} 课"),
-                                ui_meta(f"{r.duration_s:.0f}s"), ui_ok("成功")]
-            else:
-                parts = head + [ui_error(self._error_summary(r.error or "失败"))]
-            return ("上一轮", " · ".join(parts))
-        if getattr(self.main, "snapshot_ts", None):
-            try:
-                t = _compact_dt(datetime.strptime(self.main.snapshot_ts,
-                                                  "%Y-%m-%d %H:%M:%S"))
-            except Exception:
-                t = self.main.snapshot_ts
-            parts = [ui_value(t)]
-            if self.main.snapshot_meta:
-                parts.append(ui_value(self.main.snapshot_meta))
-            # 浅色字体：快照信息属次要内容，用弱化的浅灰呈现
-            value = " · ".join(parts)
-            return ("最近抓取", f"[grey62]{value}[/]")
-        return ("上一轮", ui_meta("—"))
-
     def _activity_steady(self, w) -> str:
-        """监控等待 / 空闲（含失败）：
-        • 状态 <状态> │ 下一轮 <cd> │ 上一轮 <结果> │ 来源 Google。"""
+        """监控等待 / 空闲（含失败）：• 状态 <状态> │ 下一轮 <cd> │ 来源 Google。
+        上次成功 / 数据规模由顶部的 Hero 稳定摘要负责，不在此重复。"""
         anchor = ui_meta("• 状态")
         if w and w.running:
             status = ui_ok("监控中")
@@ -1255,8 +1292,6 @@ class CourserApp(App):
         # 空占位（—）用灰色，与 gmail 中性态一致；有实值时用默认前景。
         nxt = ui_meta("—") if cd == "—" else ui_value(cd)
         seg.append(f"{ui_meta('下一轮')} {nxt}")
-        label, last = self._last_round_tail(w)
-        seg.append(f"{ui_meta(label)} {last}")
         seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
@@ -1284,11 +1319,17 @@ class CourserApp(App):
     # 键盘路由
     # ------------------------------------------------------------------
     def on_key(self, event: events.Key) -> None:
-        # FieldEditor 本身也认识 Esc，但查找态的 Esc 语义是退出整个查找，
-        # 不能先只取消输入、再要求用户按第二次 Esc。
-        if self.editing.context == "search" and event.key == "escape":
-            event.stop()
-            self._leave_search()
+        key = event.key
+        # 查找编辑态：Esc 退出整个查找；↑↓/PgUp/PgDn 浏览结果列表；其余交给编辑器
+        if self.editing.context == "search":
+            if key == "escape":
+                event.stop()
+                self._leave_search()
+            elif key in ("up", "down", "pageup", "pagedown"):
+                event.stop()
+                self._handle_cursor_nav(key)
+            else:
+                self._edit_key(event)
             return
         if self.editing.context:
             # 任何行内编辑（settings / setup）统一走 FieldEditor
@@ -1445,6 +1486,9 @@ class CourserApp(App):
         elif k == "down":
             event.stop()
             self._move_cursor(1)
+        elif k in ("pageup", "pagedown"):
+            event.stop()
+            self._handle_cursor_nav(k)
         elif k == "enter":
             event.stop()
             self._open_detail()
@@ -1460,6 +1504,14 @@ class CourserApp(App):
         if self.main.index >= self.main.top + avail:
             self.main.top = self.main.index - avail + 1
         self._render_course_window(rows, avail)
+
+    def _handle_cursor_nav(self, key: str) -> None:
+        """↑↓ 移动一行，PgUp/PgDn 按可视高度翻页（查找浏览与主页通用）。"""
+        page = max(1, self.size.height - 19)
+        step = {"down": 1, "up": -1,
+                "pagedown": page, "pageup": -page}.get(key, 0)
+        if step:
+            self._move_cursor(step)
 
     def _open_detail(self) -> None:
         rows = self._visible_rows()
@@ -1618,7 +1670,6 @@ class CourserApp(App):
         if self.watcher:
             self.watcher.stop()
 
-
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="courser",
                                  description="PKU 补退选空余名额监控（纯文本 TUI）")
@@ -1658,7 +1709,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持备用屏。
     CourserApp(cfg).run(mouse=False)
     return 0
-
 
 if __name__ == "__main__":
     import sys
