@@ -142,6 +142,22 @@ async def main() -> int:
         assert app.page == "main", "Esc 应放弃并返回"
         assert app.cfg.filters.categories == ["英语类"], "Esc 应还原修改"
 
+        # 筛选：i 添加自定义（仅按 i 出现一行输入）→ 回车保存生效
+        await p.press("f")
+        await p.pause(0.2)
+        await p.press("i")
+        await p.pause(0.1)
+        fi = app.query_one("#fadd_input", Input)
+        assert fi.has_focus and app._editing == "filteradd", "按 i 应出现单行输入"
+        fi.value = "物理学院课程"
+        await p.press("enter")
+        await p.pause(0.1)
+        assert "物理学院课程" in app.cfg.filters.names, "自定义条目应加入当前维度"
+        await p.press("enter")   # 保存并返回
+        await p.pause(0.2)
+        assert app.page == "main"
+        assert "物理学院课程" in app.cfg.filters.names, "自定义条目应已保存"
+
         # 日志 / 帮助
         await p.press("l")
         await p.pause(0.1)
