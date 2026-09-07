@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Callable, Optional
 
@@ -216,6 +217,31 @@ def _login_evidence(session: str) -> str:
         return "?"
 
 
+def _fill_value(session: str, selector: str, value: str) -> None:
+    """把 value 真正填进输入框并派发 input/change，让表单框架读得到。
+
+    opencli 的 fill 只改 DOM value、不触发键盘/事件；IAAA 老登录框架若监听
+    input/change 事件读值，直接 fill 提交时会读到空值 → 停在登录页。
+    这里用原生 value setter + 派发 input/change 兜住这种情况。
+    """
+    oc.fill(session, selector, value)
+    sleep_rand(0.4, 0.8)
+    try:
+        oc.eval_js(
+            session,
+            "(() => { const el = document.querySelector(" + json.dumps(selector) + ");"
+            " if (!el) return false;"
+            " const set = Object.getOwnPropertyDescriptor("
+            "   window.HTMLInputElement.prototype, 'value').set;"
+            " set.call(el, " + json.dumps(value) + ");"
+            " el.dispatchEvent(new Event('input', {bubbles:true}));"
+            " el.dispatchEvent(new Event('change', {bubbles:true}));"
+            " return true; })()",
+        )
+    except Exception:
+        pass
+
+
 def login(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
           force_logout: bool = True, log: Optional[Callable[[str], None]] = None,
           prog: Optional[Progress] = None) -> str:
@@ -280,10 +306,10 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
 
         # 填凭据
         if creds and creds.get("username"):
-            oc.fill(session, "input#user_name", creds["username"])
+            _fill_value(session, "input#user_name", creds["username"])
             sleep_rand(0.6, 1.2)
         if creds and creds.get("password"):
-            oc.fill(session, "input#password", creds["password"])
+            _fill_value(session, "input#password", creds["password"])
             sleep_rand(0.6, 1.2)
         else:
             sleep_rand(0.8, 1.5)  # 未配置密码：等自动填充落盘（人类约1秒）
@@ -298,9 +324,9 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
             login_errs.append(f"第{attempt}次：字段未填上（user={u_len}, pass={p_len}），已补填")
             try:
                 if creds and creds.get("username"):
-                    oc.fill(session, "input#user_name", creds["username"])
+                    _fill_value(session, "input#user_name", creds["username"])
                 if creds and creds.get("password"):
-                    oc.fill(session, "input#password", creds["password"])
+                    _fill_value(session, "input#password", creds["password"])
                 sleep_rand(1.0, 1.8)
             except Exception:
                 pass
