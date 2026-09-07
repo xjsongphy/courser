@@ -54,6 +54,24 @@ _field_value = field_value
 _field_mutate = field_mutate
 _copy_to_clipboard = copy_to_clipboard
 
+# 让系统终端的鼠标框选 + Cmd+C 复制照常工作：不进入备用屏
+# （alternate screen），把内容直接画在普通缓冲区里，
+# 这样拖动鼠标就能选中文字、Cmd+C 复制所选内容。
+try:
+    from textual.drivers.linux_driver import LinuxDriver as _LinuxDriver
+
+    class _NoAltScreenDriver(_LinuxDriver):
+        """LinuxDriver 子类：拦截并丢弃进入/退出备用屏的转义序列。"""
+
+        def write(self, data: str) -> None:
+            data = data.replace("\x1b[?1049h", "").replace("\x1b[?1049l", "")
+            if data:
+                super().write(data)
+
+    _NoAltDriver = _NoAltScreenDriver
+except Exception:  # pragma: no cover - 非 POSIX 平台回退到默认驱动
+    _NoAltDriver = None
+
 
 class CourserApp(App):
     """纯文本菜单 TUI：主页面 + 筛选/设置/日志/帮助/详情/首启设置。"""
@@ -62,6 +80,12 @@ class CourserApp(App):
     SUB_TITLE = "PKU 补退选空余名额监控"
     CSS = CSS
     BINDINGS = [Binding("ctrl+c", "quit", "退出", show=False, priority=True)]
+
+    def get_driver_class(self):
+        """使用不进入备用屏的驱动，让系统终端能鼠标框选 + Cmd+C 复制。"""
+        if _NoAltDriver is not None:
+            return _NoAltDriver
+        return super().get_driver_class()
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -303,23 +327,46 @@ class CourserApp(App):
         self.main.search_col = None
         self.main.search_query = ""
 
+    def _leave_search(self) -> None:
+        """一次 Esc 退出查找，包括正在编辑的输入态。"""
+        self._clear_search()
+        if self.editing.context == "search":
+            self._clear_editing()
+        else:
+            self.editor.reset()
+        self._render_main(force=True)
+
+    def _main_hint(self) -> str:
+        """主页底部只显示当前状态下真正可用的操作。"""
+        if self.editing.context == "search":
+            return _hint(
+                ("Tab", "换列"), ("Enter", "确认查找"),
+                ("Esc", "退出查找"),
+            )
+        if self.main.search_col:
+            return _hint(
+                ("Enter", "编辑查找"), ("Tab", "换列"),
+                ("Esc", "退出查找"),
+            )
+        return self.HINTS["main"]
+
     def _render_search_line(self) -> None:
-        """查找指示行：被查找列的列名高亮 + 输入框（编辑中）/
-        已生效查找词（过滤中）。"""
+        """查找区：标题、查找列、输入值各占明确层级。"""
         si = self.query_one("#searchinput", Static)
         if self.main.search_col is None:
             si.display = False
             si.update("")
             return
         si.display = True
-        label = f"[bold cyan]{ui_value(self._search_col_label())}[/]"
-        if self.editing.context == "search":
-            si.update(f"{ui_label('查找')}  {label}  {self.editor.markup()}  "
-                      f"{ui_meta('Tab 换列 · 回车 确认 · Esc 取消')}")
-        else:
-            si.update(f"{ui_label('查找')}  {label}  "
-                      f"{ui_value(self.main.search_query)}  "
-                      f"{ui_meta('按 / 修改 · Tab 换列 · Esc 清除')}")
+        label = ui_key(self._search_col_label())
+        value = (self.editor.markup()
+                 if self.editing.context == "search"
+                 else ui_value(self.main.search_query or "（未输入）"))
+        si.update("\n".join([
+            ui_section("查找"),
+            _kv_row("列", label, width=6),
+            _kv_row("输入", value, width=6),
+        ]))
 
     def _row_search_text(self, c: Course, key: str) -> str:
         """某列在列表中的显示文本（查找匹配用，与渲染一致）。"""
@@ -565,7 +612,7 @@ class CourserApp(App):
         keys = self.query_one("#keys", Static)
         keys.display = page == "main"
         if page == "main":
-            keys.update(self.HINTS[page])
+            keys.update(self._main_hint())
         self.query_one("#runstate", Static).display = page == "main"
         self._render_runstate()
 
@@ -621,15 +668,18 @@ class CourserApp(App):
         rows = self._visible_rows()
         # 课程窗口为底部可换行的操作提示和两行“最近一次”元信息让出空间。
         hint_width = max(1, self.size.width - 4)
-        hint_plain = _plain_markup(self.HINTS["main"])
+        hint_plain = _plain_markup(self._main_hint())
         hint_lines = sum(max(1, ceil(cell_len(line) / hint_width))
                          for line in hint_plain.splitlines() or [""])
         snapshot_extra = 1 if snapshot else 0
-        search_extra = 1 if self.main.search_col else 0
+        # 查找区固定为标题 + “列” + “输入”三行；底部提示另行渲染，
+        # 不再把快捷键挤在查找控件旁边。
+        search_extra = 3 if self.main.search_col else 0
         avail_h = max(1, self.size.height - 19 - snapshot_extra - search_extra
                       - max(0, hint_lines - 1))
         self._render_course_window(rows, avail_h)
         self._render_search_line()
+        self.query_one("#keys", Static).update(self._main_hint())
         ev = self._event_line()
         self.query_one("#event", Static).update(ev if ev else "")
 
@@ -647,12 +697,16 @@ class CourserApp(App):
     def _render_course_window(self, rows: list[Course], avail: int) -> None:
         body = self.query_one("#courselist", Static)
         if not rows:
-            if not self.courses:
-                body.update(
-                    "[dim]还没有可显示的结果。按 r 立即抓取，或按空格开始监控。[/]")
+            # 抓取已经开始后，进度区已经说明当前发生了什么；列表区保持安静，
+            # 不再重复显示“按 r / 空格开始”的启动提示。
+            if self.prog.done is not None:
+                body.update("")
             elif self.main.search_col:
                 body.update(
-                    "[dim]查找没有结果：修改查找词，或按 Esc 清除查找。[/]")
+                    "[dim]查找没有结果：修改查找词，或按 Esc 退出查找。[/]")
+            elif not self.courses:
+                body.update(
+                    "[dim]还没有可显示的结果。按 r 立即抓取，或按空格开始监控。[/]")
             else:
                 body.update(
                     "[dim]（当前视图无课程：按 1 查看全部 / 按 2 查看符合筛选的课程）[/]")
@@ -1246,6 +1300,12 @@ class CourserApp(App):
     # 键盘路由
     # ------------------------------------------------------------------
     def on_key(self, event: events.Key) -> None:
+        # FieldEditor 本身也认识 Esc，但查找态的 Esc 语义是退出整个查找，
+        # 不能先只取消输入、再要求用户按第二次 Esc。
+        if self.editing.context == "search" and event.key == "escape":
+            event.stop()
+            self._leave_search()
+            return
         if self.editing.context:
             # 任何行内编辑（settings / setup）统一走 FieldEditor
             self._edit_key(event)
@@ -1400,9 +1460,7 @@ class CourserApp(App):
             self._search_cycle_col(1)
         elif k == "escape" and self.main.search_col:
             event.stop()
-            self._clear_search()
-            self.log_line("已清除查找")
-            self._render_main(force=True)
+            self._leave_search()
         elif k == "up":
             event.stop()
             self._move_cursor(-1)
