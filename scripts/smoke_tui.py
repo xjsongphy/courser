@@ -99,7 +99,28 @@ async def main() -> int:
         app.render_table()
         await pilot.pause()
 
-    print("TUI smoke OK: help/filter/settings/view/interval/table 均正常")
+        # 终端缩放：窄屏自动切到紧凑表格，恢复后还原完整列。
+        await pilot.resize_terminal(40, 14)
+        assert app._table_layout in {"tiny", "compact", "normal"}, \
+            (app._table_layout, app.size)
+        assert len(app.query_one("#table").columns) <= 6
+        await pilot.resize_terminal(140, 40)
+        assert app._table_layout == "wide", app._table_layout
+        assert len(app.query_one("#table").columns) == 8
+
+    # Ctrl+C 是应用级高优先级退出：在弹窗中也必须生效。
+    quit_cfg = Config.load()
+    quit_cfg.first_run_done = True
+    quit_app = CourserApp(quit_cfg)
+    async with quit_app.run_test() as pilot:
+        quit_app.action_open_help()
+        await pilot.pause()
+        assert isinstance(quit_app.screen, HelpScreen)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert quit_app._exit and not quit_app.is_running
+
+    print("TUI smoke OK: help/filter/settings/view/interval/table/resize/ctrl+c 均正常")
     return 0
 
 
