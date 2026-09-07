@@ -24,9 +24,13 @@
 - **动态页数解析** — 每轮读取分页器真实翻页，页数变化无需改配置
 - **人类节奏** — 操作随机间隔、轮询 ± 抖动；不输验证码，风控自动降速提示
 - **风控触发率显示** — 状态栏实时评估「请勿使用刷课机」警告的触发率（请求频率 + 页面警告语检测）；检测到警告语判 100% 并自动放慢节奏
-- **菜单驱动 TUI** — 监控 / 筛选 / 设置 / 帮助；快捷键辅助
-- **pi 风格筛选器** — 顶部输入即输即滤，回车添加 / 切换选中
-- **首次配置向导** — 初次启动强制引导 opencli / gws 与收件邮箱，之后仍可在「设置」修改
+- **持久监控 TUI** — 主页 = 状态摘要 + 最近抓取课程 + 最近一条事件；全中文，配色克制（默认正文 / bold 标题 / dim 次要 / cyan 交互与当前值 / green 成功 / yellow 警告 / red 失败），无主页输入框，纯键盘：
+  `空格 开始/停止 · r 立即抓取 · 1/2/3 视图(全部/符合筛选/只看空余) · ↑↓ 浏览 · 回车 详情 · f 筛选 · s 设置 · l 日志 · h 帮助 · q 退出`
+- **课程信息完整** — 主页课程列表沿用「最近一次成功结果」的字段（页/课程号/课程名/课程类别/开课单位/教师/限选/空余/状态），按终端宽度自动增减列、只截断超长名称
+- **筛选单列 selector** — 独立「筛选」页：Tab 切维度（课程名/类别/院系）、↑↓ 移动、空格 选中/取消；回车 保存，Esc 放弃（改动未保存前不落盘）
+- **设置 draft 事务** — 设置改动先进草稿：ctrl+s 保存、Esc 放弃、t 测试邮件（只用当前改动不落盘）
+- **日志移出主页** — 完整运行日志放独立「日志」页（l），主页只留最近一条事件；落盘 data/courser.log 不变
+- **首启就绪向导** — 首次启动整页引导，填写收件邮箱后「就绪→回车开始」，取代“按某个数=我已完成”；Esc 永不保存
 - **后台浏览器** — opencli 驱动真实 Chrome，弹出不抢焦点，可点开查看实时进度
 
 ## 工作原理
@@ -119,7 +123,7 @@ courser/
 │   ├── notifier.py     # gws 邮件通知（去重/冷却在 watcher）
 │   ├── watcher.py      # 后台监控线程（每轮重新登录）
 │   ├── config.py       # config.json + .env
-│   └── tui.py          # Textual TUI（菜单 / 筛选 / 设置 / 帮助）
+│   └── tui.py          # 纯文本 TUI（主页 + 筛选/设置/日志/帮助/详情/首启）
 ├── scripts/            # test_pipeline / test_unit / test_mail / simulate_seats / smoke_tui
 ├── config.example.json
 ├── .env.example
@@ -130,7 +134,7 @@ courser/
 
 | 模块 | 职责 |
 |------|------|
-| `tui.py` | 菜单驱动 Textual 界面；pi 风格筛选器；单一「设置」入口；首次向导 |
+| `tui.py` | 持久监控 TUI：主页状态摘要 + 课程列表 + 单事件；筛选/设置/日志/帮助/详情/首启子页；Esc 永不保存 |
 | `watcher.py` | 按随机抖动间隔轮询；同课通知冷却去重 |
 | `fetch.py` | 登录 / 进入补退选 / `Page X of Y` 动态翻页，只读提取限数与已选 |
 | `opencli.py` | opencli CLI 通信层（eval / click / fill / open） |
@@ -156,7 +160,7 @@ uv run courser --once                     # 端到端一轮（需已配置 openc
 - [OpenCLI](https://github.com/jackwener/OpenCLI) — 浏览器驱动层
 - [googleworkspace/cli](https://github.com/googleworkspace/cli) — gws，Gmail API 发送
 - [Textual](https://github.com/Textualize/textual) / [rich](https://github.com/Textualize/rich) — TUI 与富文本
-- [pi](https://github.com/earendil-works/pi) — 即输即滤选择器交互参考
+- [codex](https://github.com/openai/codex) — TUI 配色 / 纯文本页面交互参考
 
 ## License
 

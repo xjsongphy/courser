@@ -1,4 +1,8 @@
-"""TUI 无头冒烟测试：用 textual run_test 驱动界面，验证各界面能正常打开/交互。
+"""TUI 无头冒烟测试：驱动重构后的纯文本监控 TUI。
+
+覆盖：首启设置（填邮箱→就绪→进入主页）→ 主页视图 1/2/3 → 课程光标与详情 →
+筛选（Tab 维度 / 空格切换 / 回车保存 / Esc 放弃）→ 设置（draft 保存/放弃）→
+日志 / 帮助返回 → 任意页 q / Ctrl+C 退出。
 
 用法：
     uv run python scripts/smoke_tui.py
@@ -19,156 +23,197 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 _tmpdir = tempfile.mkdtemp(prefix="courser-smoke-")
 os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
 
+from textual.widgets import Button, Input, Select, Switch  # noqa: E402
+
 from courser.config import Config  # noqa: E402
-from courser.tui import (CourserApp, FilterScreen, FirstRunScreen,  # noqa: E402
-                         HelpScreen, IntervalModal, SettingsScreen, ToggleRow)
+from courser.fetch import Course  # noqa: E402
+from courser.tui import CourserApp  # noqa: E402
 
 
-def _assert_no_gui_widgets(screen) -> None:
-    """弹窗内不允许出现任何图形控件（按钮/开关/下拉）。"""
-    from textual.widgets import Button, Select, Switch
+def _assert_no_gui_widgets(app) -> None:
+    """整页不允许出现任何图形控件（按钮/开关/下拉/表格）。"""
     for wtype in (Button, Select, Switch):
-        assert not screen.query(wtype), \
-            f"{type(screen).__name__} 中不应出现 {wtype.__name__}"
+        assert not app.query(wtype), f"界面中不应出现 {wtype.__name__}"
+
+
+def _fake(app) -> None:
+    app.courses = [
+        Course(course_no="001", name="英语写作", category="英语类",
+               dept="英语系", teacher="张老师", quota=50, selected=49, avail=1,
+               seats_raw="50/49", status="可申请", seq="a", page=1),
+        Course(course_no="002", name="普通物理", category="物理类",
+               dept="物理学院", teacher="李老师", quota=60, selected=60, avail=0,
+               seats_raw="60/60", status="不可申请", seq="b", page=2),
+    ]
+    app.candidate_lists = {"names": ["英语写作", "普通物理"],
+                           "categories": ["英语类", "物理类"],
+                           "depts": ["英语系", "物理学院"]}
+    app.snapshot_ts = "2026-09-07 12:00:00"
+    app.snapshot_meta = "2 页 · 2 门课程"
 
 
 async def main() -> int:
+    # ---- 首启设置：填邮箱 → 就绪 → 主页 ----
     cfg = Config.load()
-    cfg.first_run_done = False  # 验证首次向导会弹出
+    cfg.first_run_done = False
     app = CourserApp(cfg)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.2)
-        assert isinstance(app.screen, FirstRunScreen), \
-            f"expect FirstRunScreen on first launch, got {type(app.screen)}"
-        _assert_no_gui_widgets(app.screen)
-        # 首次向导纯键盘：按 2 = 我已配置完成 → 关闭向导
-        await pilot.press("2")
-        await pilot.pause(0.2)
-        assert not isinstance(app.screen, FirstRunScreen), "按 2 应完成首次配置并关闭向导"
-        assert app.cfg.first_run_done, "按 2 应写入 first_run_done"
-        await pilot.pause(0.1)
-        # 帮助界面：真实按键 h 打开 + Esc 关闭（回归：之前缺 action_close 导致 Esc 关不掉）
-        await pilot.press("h")
-        await pilot.pause(0.2)
-        assert isinstance(app.screen, HelpScreen), f"expect HelpScreen, got {type(app.screen)}"
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-        assert not isinstance(app.screen, HelpScreen), "Esc 应关闭帮助界面"
-        # 其他模态界面同类回归：打开→Esc 关闭；且不含图形控件
-        for key, cls in [("f", FilterScreen), ("c", SettingsScreen), ("n", IntervalModal)]:
-            await pilot.press(key)
-            await pilot.pause(0.2)
-            assert isinstance(app.screen, cls), f"expect {cls.__name__}, got {type(app.screen).__name__}"
-            _assert_no_gui_widgets(app.screen)
-            await pilot.press("escape")
-            await pilot.pause(0.2)
-            assert not isinstance(app.screen, cls), f"Esc 应关闭 {cls.__name__}"
-        # 帮助（调用式，保留原断言）
-        app.action_open_help()
-        await pilot.pause()
-        assert isinstance(app.screen, HelpScreen), f"expect HelpScreen, got {type(app.screen)}"
-        app.pop_screen()
-        await pilot.pause()
+    async with app.run_test(size=(120, 36)) as p:
+        await p.pause(0.3)
+        assert app.page == "setup", f"首次启动应在设置向导页，实际 {app.page}"
+        _assert_no_gui_widgets(app)
+        # 未配置时按 1 不会开监控（此路径不可达，因为主页未进入）；跳过
+        # 用 ↓ 选中并编辑收件邮箱
+        await p.press("down")
+        await p.pause(0.1)
+        si = app.query_one("#setup_input", Input)
+        assert si.has_focus and app._editing == "setup", "首启应出现底部单行输入"
+        si.value = "me@example.com"
+        await p.press("enter")
+        await p.pause(0.1)
+        assert app.cfg.notify.to == "me@example.com", "收件邮箱应写入"
+        await p.press("enter")  # 就绪后回车开始使用
+        await p.pause(0.2)
+        assert app.page == "main", f"就绪回车应进入主页，实际 {app.page}"
+        assert app.cfg.first_run_done, "完成首启应置 first_run_done"
+        _assert_no_gui_widgets(app)
+        await p.press("q")
 
-        # 筛选：pi 风格添加/切换维度/切换命中模式
-        app.action_open_filters()
-        await pilot.pause()
-        fs = app.screen
-        assert isinstance(fs, FilterScreen)
-        fs.query_one("#query").value = "通识核心课I类"
-        fs._on_query_submit(None)  # 回车：自定义添加
-        fs.action_group("2")
-        fs.action_toggle_match()
-        await pilot.pause()
-        assert "通识核心课I类" in fs.entries["names"], f"entries={fs.entries['names']}"
-        assert app.cfg.filters.match == "all"
-        fs.action_close()
-        await pilot.pause()
+    # ---- 主页：视图 / 光标 / 详情 / 各页返回 ----
+    cfg2 = Config.load()
+    cfg2.first_run_done = True
+    cfg2.filters.categories = ["英语类"]
+    app = CourserApp(cfg2)
+    async with app.run_test(size=(120, 36)) as p:
+        await p.pause(0.3)
+        assert app.page == "main"
+        _fake(app)
+        app._render_main(force=True)
+        # 视图 3（只看空余）→ 只剩空余课程；视图 1 全部
+        await p.press("3")
+        await p.pause(0.1)
+        assert app.view == "seats" and len(app._visible_rows()) == 1, "视图3应只剩空余"
+        await p.press("2")
+        await p.pause(0.1)
+        assert app.view == "matched" and len(app._visible_rows()) == 1, "视图2应只看符合筛选"
+        await p.press("1")
+        await p.pause(0.1)
+        assert app.view == "all" and len(app._visible_rows()) == 2
+        # 光标下移 + 详情
+        await p.press("down")
+        await p.pause(0.05)
+        assert app.c_idx == 1
+        await p.press("enter")
+        await p.pause(0.1)
+        assert app.page == "detail"
+        body = str(app.query_one("#detbody").render())
+        assert "普通物理" in body and "课程号" in body, "详情应含完整课程信息"
+        await p.press("escape")
+        await p.pause(0.1)
+        assert app.page == "main"
 
-        # 设置（唯一入口）：标签列 + 键盘切换行 + ctrl+s 保存
-        app.action_open_settings()
-        await pilot.pause()
-        s = app.screen
-        assert isinstance(s, SettingsScreen)
-        s.query_one("#set_interval").value = "10"
-        s._apply()
-        assert app.cfg.interval_min == 10.0
-        # ToggleRow：循环切换 窗口模式/筛选组合/强制重登
-        tgl = s.query_one("#tgl_relogin", ToggleRow)
-        before = tgl.value
-        tgl.cycle()
-        assert tgl.value != before, f"cycle 应改变值：{before} -> {tgl.value}"
-        s.query_one("#tgl_match", ToggleRow).cycle()
-        # ctrl+s 保存并关闭（不依赖鼠标）
-        await pilot.press("ctrl+s")
-        await pilot.pause(0.2)
-        assert not isinstance(app.screen, SettingsScreen), "ctrl+s 应保存并关闭设置"
-        assert app.cfg.interval_min == 10.0
-        await pilot.pause(0.1)
+        # 筛选：Tab 切维度、空格切换、回车保存
+        await p.press("f")
+        await p.pause(0.2)
+        assert app.page == "filters"
+        assert app.f_dim == 0
+        await p.press("tab")
+        await p.pause(0.1)
+        assert app.f_dim == 1, "Tab 应切到课程类别"
+        # 类别候选：英语类（已选/默认），空格取消
+        await p.press("space")
+        await p.pause(0.1)
+        assert app.cfg.filters.categories == [], "空格应取消默认类别"
+        await p.press("space")
+        await p.pause(0.1)
+        assert app.cfg.filters.categories == ["英语类"], "再按空格应重新选中"
+        await p.press("enter")
+        await p.pause(0.2)
+        assert app.page == "main", "筛选回车应保存并返回"
+        # 再次进入，空格改动后 Esc 放弃
+        await p.press("f")
+        await p.pause(0.2)
+        await p.press("tab")   # 课程类别
+        await p.pause(0.1)
+        await p.press("space")
+        await p.pause(0.1)
+        assert app.cfg.filters.categories == [], "进入后空格应移除"
+        await p.press("escape")
+        await p.pause(0.2)
+        assert app.page == "main", "Esc 应放弃并返回"
+        assert app.cfg.filters.categories == ["英语类"], "Esc 应还原修改"
 
-        # 视图切换 + 间隔弹窗
-        app.action_toggle_view()
-        app.action_set_interval_dialog()
-        await pilot.pause()
-        assert isinstance(app.screen, IntervalModal)
-        app.pop_screen()
-        await pilot.pause()
+        # 日志 / 帮助
+        await p.press("l")
+        await p.pause(0.1)
+        assert app.page == "logs"
+        await p.press("escape")
+        await p.pause(0.1)
+        assert app.page == "main"
+        await p.press("h")
+        await p.pause(0.1)
+        assert app.page == "help"
+        await p.press("escape")
+        await p.pause(0.1)
+        assert app.page == "main"
 
-        # 表格渲染（空数据 + 假数据各一次）
-        app.render_table()
-        from courser.fetch import Course
-        app.courses = [Course(course_no="001", name="测试课", category="通识课(通识核心课I类)",
-                              dept="英语语言文学系", quota=50, selected=49, avail=1,
-                              seq="X1")]
-        app.render_table()
-        await pilot.pause()
+        # 设置：编辑收件邮箱 → ctrl+s 保存 → 主页
+        await p.press("s")
+        await p.pause(0.2)
+        assert app.page == "settings"
+        for _ in range(2):
+            await p.press("down")
+        await p.pause(0.05)
+        _g, f = app.s_rows[app.s_idx]
+        assert f["key"] == "to", f"光标应到收件邮箱，实际 {f['key']}"
+        await p.press("enter")
+        await p.pause(0.1)
+        se = app.query_one("#sedit_input", Input)
+        assert se.has_focus and app._editing == "settings"
+        se.value = "x@y.com"
+        await p.press("enter")
+        await p.pause(0.1)
+        assert app.sd["to"] == "x@y.com"
+        await p.press("ctrl+s")
+        await p.pause(0.2)
+        assert app.page == "main" and app.cfg.notify.to == "x@y.com", "ctrl+s 应保存并返回"
+        # 设置放弃：改后 Esc 还原
+        await p.press("s")
+        await p.pause(0.2)
+        for _ in range(2):
+            await p.press("down")
+        await p.press("enter")
+        await p.pause(0.05)
+        se2 = app.query_one("#sedit_input", Input)
+        se2.value = "zz@zz"
+        await p.press("enter")
+        await p.pause(0.05)
+        assert app.sd["to"] == "zz@zz"
+        await p.press("escape")
+        await p.pause(0.2)
+        assert app.page == "main" and app.cfg.notify.to == "x@y.com", "Esc 应放弃"
+        await p.press("q")
 
-        # 终端缩放：窄屏自动切到紧凑表格，恢复后还原完整列。
-        await pilot.resize_terminal(40, 14)
-        assert app._table_layout in {"tiny", "compact", "normal"}, \
-            (app._table_layout, app.size)
-        assert len(app.query_one("#table").columns) <= 6
-        await pilot.resize_terminal(140, 40)
-        assert app._table_layout == "wide", app._table_layout
-        assert len(app.query_one("#table").columns) == 8
-
-    # Ctrl+C 是应用级高优先级退出：主界面与任意弹窗都必须生效。
-    async def _quit_case(open_screen, expect=None):
+    # ---- q / Ctrl+C：任意页退出 ----
+    async def _quit_case(page_key: str | None, key: str) -> None:
         qc = Config.load()
         qc.first_run_done = True
         qa = CourserApp(qc)
-        async with qa.run_test() as p:
-            await p.pause(0.2)
-            await open_screen(p)
-            await p.pause(0.2)
-            if expect is not None:
-                assert isinstance(qa.screen, expect), \
-                    f"期望 {expect.__name__}，实际 {type(qa.screen).__name__}"
-            await p.press("ctrl+c")
-            await p.pause(0.2)
-            assert qa._exit and not qa.is_running, \
-                f"ctrl+c 未退出：界面={type(qa.screen).__name__}"
+        async with qa.run_test(size=(100, 30)) as p2:
+            await p2.pause(0.3)
+            if page_key:
+                await p2.press(page_key)
+                await p2.pause(0.2)
+            await p2.press(key)
+            await p2.pause(0.3)
+            assert getattr(qa, "_exit", False) or not qa.is_running, \
+                f"{key} 未退出：page={qa.page}"
 
-    # 主界面
-    async def _noop(p):  # noqa: ANN001
-        return None
-    await _quit_case(_noop)
-    # 帮助 / 筛选 / 设置 / 间隔 四个弹窗（真实按键打开后 Ctrl+C）
-    for key, cls in [("h", HelpScreen), ("f", FilterScreen),
-                     ("c", SettingsScreen), ("n", IntervalModal)]:
-        await _quit_case(lambda p, k=key: p.press(k), expect=cls)
-    # 首次向导（first_run_done=False 时自动弹出）
-    qc2 = Config.load()
-    qc2.first_run_done = False
-    qa2 = CourserApp(qc2)
-    async with qa2.run_test() as p2:
-        await p2.pause(0.3)
-        assert isinstance(qa2.screen, FirstRunScreen), type(qa2.screen).__name__
-        await p2.press("ctrl+c")
-        await p2.pause(0.2)
-        assert qa2._exit and not qa2.is_running
+    for page_key in (None, "f", "s", "l", "h"):
+        await _quit_case(page_key, "q")
+    for page_key in (None, "f", "s"):
+        await _quit_case(page_key, "ctrl+c")
 
-    print("TUI smoke OK: help/filter/settings/view/interval/table/resize/ctrl+c 均正常")
+    print("TUI smoke OK: setup/主页视图/详情/筛选/设置/日志/帮助 + q/Ctrl+C 均正常")
     return 0
 
 

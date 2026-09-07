@@ -1,31 +1,40 @@
-"""courser 的 Textual TUI。
+"""courser 的纯文本监控 TUI。
 
-界面刻意保持为终端原生的、类似 codex 的工作流：纯键盘操作（不启用
-鼠标），一个简短状态行、课程结果与运行记录，以及底部命令输入框。
-所有操作既有快捷键，也可通过 composer 输入 ``/start``、``/fetch``、
-``/filters`` 等命令完成。配色遵循 codex 的 styles.md：默认前景色为
-主，标题加粗、次要信息 dim；cyan 用于输入提示/状态，green/red 表示
-成功/错误，magenta 为品牌色。
+定位：一个 **persistent status monitor**，而不是塞进终端的桌面应用。主页在
+常态下只呈现当前状态、关注的课程与最近一次事件；所有配置都通过少量二级页面
+完成。页面用线条边框面板分区，配色克制：
+
+- 默认前景为正文，bold = 标题/区块/当前项，dim = 次要元信息；
+- cyan 只表示可交互 / 当前值 / 当前光标；
+- green = 成功 / 有空余 / 监控中；yellow = 警告（风控、未就绪）；red = 失败；
+- 不用自造色与品牌色。全中文界面。
+
+交互规范（一种操作一种入口，一个键一种语义）：
+- Enter = 进入 / 确认；Esc = 返回 / 放弃（**Esc 任何地方都不保存**）；
+- ↑↓ = 移动，Space = 开始/停止或选中/取消（各页内遵循）；
+- 主页键：Space 开始/停止 · r 立即抓取 · f 筛选 · s 设置 · l 日志 ·
+  1/2/3 视图（全部/符合筛选/只看空余）· h 帮助 · q 退出。
+主页无输入框；仅筛选搜索、设置字段编辑、首启向导的填写需要底部单行输入。
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
-from rich.text import Text
-from textual import events
-from textual import on, work
+from rich.cells import cell_len
+from rich.markup import escape
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.widgets import (DataTable, Input, Label,
-                             ListItem, ListView, RichLog, Static)
+from textual.widgets import Input, Static
 
 from . import notifier
 from .config import Config, load_env_file
@@ -35,669 +44,201 @@ from .watcher import RoundResult, Watcher
 
 GROUPS = [("names", "课程名"), ("categories", "课程类别"), ("depts", "开课院系")]
 
-TABLE_LAYOUTS = {
-    "wide": [
-        ("page", "页", 4), ("no", "课程号", 10), ("name", "课程名", 26),
-        ("cat", "课程类别", 20), ("dept", "开课单位", 14), ("teacher", "教师", 14),
-        ("seats", "限/选", 9), ("avail", "空余", 6),
-    ],
-    "normal": [
-        ("no", "课程号", 10), ("name", "课程名", 26), ("cat", "课程类别", 20),
-        ("seats", "限/选", 9), ("avail", "空余", 6), ("status", "状态", 9),
-    ],
-    "compact": [
-        ("name", "课程", 22), ("seats", "限/选", 9),
-        ("avail", "空余", 6), ("status", "状态", 8),
-    ],
-    "tiny": [("name", "课程", 18), ("avail", "空余", 6)],
-}
+# 课程详情字段（中文标签）——含旧“查看最近一次结果”的全部信息
+COURSE_DETAIL_FIELDS = [
+    ("课程号", "course_no"), ("课程名", "name"), ("课程类别", "category"),
+    ("学分", "credits"), ("周学时", "weekly_hours"), ("教师", "teacher"),
+    ("课序号", "class_no"), ("开课单位", "dept"), ("年级", "grade"),
+    ("时间地点", "schedule"), ("P/NP", "pnp"), ("限/选", "seats_raw"),
+    ("选课状态", "status"), ("所属页", "page"), ("课程id", "seq"),
+]
 
+# 设置页字段分组：[组名, [字段…]]；字段 dict：key/label/kind
+# kind: text|password|int|float|enum；enum 带 opts=[(value,label)]
+SETTINGS_FIELDS: list[tuple[str, list[dict]]] = [
+    ("账号凭据（可选；留空则依赖浏览器密码管理器自动填充）", [
+        {"key": "username", "label": "学号", "kind": "text"},
+        {"key": "password", "label": "密码", "kind": "password"},
+    ]),
+    ("邮件通知（gws 发送，需先 `gws auth login` 授权）", [
+        {"key": "to", "label": "收件邮箱", "kind": "text"},
+        {"key": "gws_from", "label": "gws 发件账号", "kind": "text"},
+        {"key": "max_per_hour", "label": "每小时最多发送", "kind": "int"},
+        {"key": "min_interval_min", "label": "同课通知冷却（分）", "kind": "float"},
+    ]),
+    ("轮询节奏（自动带随机抖动）", [
+        {"key": "interval_min", "label": "轮询间隔（分）", "kind": "float"},
+        {"key": "interval_jitter", "label": "间隔抖动", "kind": "float"},
+        {"key": "page_delay_min", "label": "翻页间隔下限（秒）", "kind": "float"},
+        {"key": "page_delay_max", "label": "翻页间隔上限（秒）", "kind": "float"},
+    ]),
+    ("行为", [
+        {"key": "session", "label": "opencli 会话名", "kind": "text"},
+        {"key": "window", "label": "浏览器窗口", "kind": "enum",
+         "opts": [("background", "后台窗口（不抢焦点）"), ("foreground", "前台窗口")]},
+        {"key": "force_relogin", "label": "每轮强制重新登录", "kind": "enum",
+         "opts": [("false", "关"), ("true", "开")]},
+    ]),
+]
 
-class ComposerInput(Input):
-    """底部 composer；空白时把传统单键快捷键交还给应用。
+CSS = """
+Screen { background: transparent; }
+Vertical, VerticalScroll, Horizontal, Static, Input { background: transparent; }
+VerticalScroll:focus { border: none; }
+Input { border: none; padding: 0; }
+Input:focus { border: none; }
 
-    这样用户点进输入框后仍能直接按 ``h``、``f`` 等操作；一旦已经输入
-    内容，按键则完全作为普通文本，避免妨碍输入命令。
-    """
+.panel { border: solid #5c5c5c; padding: 0 1; }
 
-    _SHORTCUTS = {
-        "s": "action_toggle_monitor",
-        "r": "action_run_round",
-        "n": "action_set_interval_dialog",
-        "f": "action_open_filters",
-        "c": "action_open_settings",
-        "h": "action_open_help",
-        "v": "action_toggle_view",
-        "q": "action_quit",
-    }
+#brand { height: 1; padding: 0 1; }
+#stage { height: 1fr; padding: 0 1; }
 
-    def on_key(self, event) -> None:
-        action = self._SHORTCUTS.get(event.key) if not self.value else None
-        if action:
-            event.prevent_default()
-            getattr(self.app, action)()
+/* 主页 */
+#page-main { height: 1fr; padding: 0 1; }
+#summary, #event { height: auto; }
+#courselist { height: auto; }
+#coursehead { height: auto; }
 
+/* 次级整页面板 */
+#page-filters, #page-settings, #page-logs, #page-help,
+#page-detail, #page-setup { height: 1fr; padding: 0 1;
+                            border: solid #5c5c5c; }
 
-class ToggleRow(Static):
-    """一行"标签: 值"的键盘切换项；←/→（或空格/回车）循环切换。
+#logscroll, #helpscroll, #detscroll { height: 1fr; }
+#filters_list, #settings_list, #setupbody { height: auto; }
+#searchrow, #seditrow, #setupeditrow { height: 1; margin-top: 1; }
+#searchrow Static, #seditrow Static, #setupeditrow Static { color: cyan; }
+#searchrow Input, #seditrow Input, #setupeditrow Input { width: 1fr; }
 
-    替代 Switch / Select 等图形控件，Tab 可在输入框与这些行之间移动
-    焦点，聚焦时行首显示 ❯。
-    """
-
-    can_focus = True
-
-    def __init__(self, label: str, options: list[tuple[str, str]],
-                 value: str, id: Optional[str] = None) -> None:  # noqa: A002
-        super().__init__(id=id, classes="toggle")
-        self.row_label = label
-        self.options = options
-        self.value = value
-
-    def set_value(self, value: str) -> None:
-        self.value = value
-        self._refresh()
-
-    def cycle(self, step: int = 1) -> None:
-        values = [v for _l, v in self.options]
-        if self.value in values:
-            self.set_value(values[(values.index(self.value) + step) % len(values)])
-        else:
-            self.set_value(values[0])
-
-    def _refresh(self) -> None:
-        current = next((l for l, v in self.options if v == self.value), self.value)
-        cursor = "❯" if self.has_focus else " "
-        self.update(f"{cursor} {self.row_label}: {current}   [dim]←/→ 切换[/]")
-
-    def on_mount(self) -> None:
-        self._refresh()
-
-    def on_focus(self) -> None:
-        self._refresh()
-
-    def on_blur(self) -> None:
-        self._refresh()
-
-    def on_key(self, event) -> None:
-        if event.key in ("right", "space", "enter"):
-            self.cycle(1)
-            event.stop()
-            event.prevent_default()
-        elif event.key == "left":
-            self.cycle(-1)
-            event.stop()
-            event.prevent_default()
-
-
-def _risk_text(percent: int, label: str) -> str:
-    """按风险等级渲染"风控触发率"，Static 默认启用 rich markup。"""
-    color = {"无": "green", "低": "green", "中": "cyan",
-             "高": "red", "极高": "red", "已触发/疑似": "bold red"}.get(label, "cyan")
-    return f"风控[bold {color}] {percent}%({label})[/]"
-
-APP_CSS = """
-/* 终端原生观感：默认前景色为主，dim 次要信息，品牌 magenta。 */
-#app_title { height: 1; padding: 0 1; text-style: bold; color: magenta; }
-#context { height: 1; padding: 0 1; text-style: dim; }
-#status { height: 1; padding: 0 1; text-style: dim; }
-#workspace { height: 1fr; padding: 0 1; }
-#welcome { height: auto; margin: 2 0 1 0; }
-#table { height: 1fr; border: none; }
-#log { height: 10; margin-top: 1; border: none; }
-#composer { height: 3; margin: 0 1; }
-#composer_hint { height: 1; padding: 0 1; text-style: dim; }
-DataTable > .datatable--header { text-style: bold; }
-
-/* 弹窗：统一宽度、内边距与边框；屏幕层压暗并居中，避免主界面内容透出。 */
-ModalScreen { align: center middle; background: $background 75%; }
-#filterscreen { width: 94; height: 82%; padding: 1 2;
-                background: $surface; border: round $foreground 40%; }
-#helpbox, #settingsbox, #firstrunbox { width: 96; height: 86%; padding: 1 2;
-                background: $surface; border: round $foreground 40%; }
-#intervalbox { width: 64; height: 9; padding: 1 2; align: center middle;
-               background: $surface; border: round $foreground 40%; }
-#helpbox { overflow-y: auto; }
-#fsbody { height: 1fr; }
-#dim_label, #match_label, #fs_hint { text-style: dim; }
-#fs_hint { padding: 0 1; }
-#cands { width: 3fr; }
-#selpanel { width: 2fr; padding: 0 1; }
-#sel_list { height: 1fr; overflow: auto; }
-#query { margin: 1 0; }
-
-/* 设置页：固定标签列 + 输入列，字段说明不随输入内容消失。 */
-#set_hint { text-style: dim; margin-bottom: 1; }
-#setscroll { height: 1fr; }
-.section { text-style: bold; margin-top: 1; }
-.hint { text-style: dim; }
-.row { height: 3; }
-.field_label { width: 22; height: 3; content-align: left middle; }
-.row Input { width: 1fr; }
-.toggle { height: 1; margin-top: 1; }
-.help-title { text-style: bold; }
+#keys, #runstate { height: 1; padding: 0 1; }
 """
 
 
-# ---------------------------------------------------------------------------
-# 帮助
-# ---------------------------------------------------------------------------
+class FocusScroll(VerticalScroll):
+    """可聚焦滚动区：↑↓/PgUp/PgDn/Home/End 原生滚动，字母数字键交给应用。"""
+
+    can_focus = True
+
+
+class FocusableStatic(Static):
+    """惰性焦点锚：可被聚焦但自己不消费任何键，让方向键/字母键冒泡到应用。"""
+
+    can_focus = True
+
+
+def _cut(s: str, width: int) -> str:
+    """按显示宽度截断（中文按两格计），超宽以 … 结尾。"""
+    if cell_len(s) <= width:
+        return s
+    out = ""
+    for ch in s:
+        if cell_len(out + ch) + 1 > width:
+            break
+        out += ch
+    return out + "…"
+
+
+def _pad(s: str, width: int) -> str:
+    s = _cut(s, width)
+    return s + " " * (width - cell_len(s))
+
+
+def _field_value(cfg: Config, key: str) -> str:
+    if key == "username":
+        return cfg.credentials.username
+    if key == "password":
+        return cfg.credentials.password
+    if key == "to":
+        return cfg.notify.to
+    if key == "gws_from":
+        return cfg.notify.gws_from
+    if key == "max_per_hour":
+        return str(cfg.notify.max_per_hour)
+    if key == "min_interval_min":
+        return str(cfg.notify.min_interval_min)
+    if key == "force_relogin":
+        return "true" if cfg.force_relogin else "false"
+    return str(getattr(cfg, key, ""))
+
+
+def _field_mutate(cfg: Config, key: str, value: str) -> None:
+    if key == "username":
+        cfg.credentials.username = value
+    elif key == "password":
+        cfg.credentials.password = value
+    elif key == "to":
+        cfg.notify.to = value
+    elif key == "gws_from":
+        cfg.notify.gws_from = value
+    elif key == "max_per_hour":
+        cfg.notify.max_per_hour = max(1, int(float(value)))
+    elif key == "min_interval_min":
+        cfg.notify.min_interval_min = float(value)
+    elif key == "force_relogin":
+        cfg.force_relogin = value == "true"
+    elif key == "session":
+        cfg.session = value
+    elif key == "window":
+        cfg.window = value
+    else:
+        setattr(cfg, key, float(value))
+
+
+def _risk_text(percent: int, label: str) -> str:
+    color = {"高": "red", "极高": "red", "中": "yellow",
+             "已触发/疑似": "red"}.get(label, "yellow")
+    if label == "无" or percent == 0:
+        return ""
+    return f"风控 [bold {color}]⚠ {percent}%({label})[/]"
 
-class HelpScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "close", "关闭")]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="helpbox"):
-            yield Label("courser — PKU 补退选空余名额监控", classes="help-title")
-            yield Static(
-                "命令（底部输入框，和快捷键等价）\n"
-                "  /start  /stop  开始 / 停止监控       /fetch 立即抓取一轮\n"
-                "  /filters 管理筛选条件                /settings 修改全部设置\n"
-                "  /interval [分钟] 修改轮询间隔        /view 切换课程视图\n"
-                "  /help 查看本页                        /quit 退出\n"
-                "  Ctrl+C 任意界面退出（含弹窗/向导）\n\n"
-                "监控流程（每轮重新登录）\n"
-                "  登出旧会话 → 打开 IAAA 登录页 → 等待密码管理器自动填充"
-                "（或在「设置」里填学号/密码）→ 点登录 → 补退选 → 动态翻页读取 限数/已选\n\n"
-                "筛选（/filters 或 f）\n"
-                "  顶部输入框：输入即过滤课程；回车 添加/切换 选中；\n"
-                "  支持 课程名 / 课程类别 / 开课院系 三个维度，每维度可多选、可并存；\n"
-                "  m 切换「满足任一条件 / 满足全部条件」；d 删除条目。\n\n"
-                "通知（/settings → 邮件通知）\n"
-                "  通过 gws 发送：需先在命令行执行一次 gws auth login 完成授权，\n"
-                "  并在「设置」填写 收件邮箱（发件账号可选）；同课通知有冷却去重。\n\n"
-                "安全与节奏\n"
-                "  浏览器以后台窗口运行（不抢焦点，可打开 Dock/任务栏窗口实时查看）；\n"
-                "  相邻操作随机间隔、轮询间隔带抖动，模仿人类；\n"
-                "  绝不输入验证码，登录失败/风控时自动降速并提示人工处理。\n\n"
-                "快捷键\n"
-                "  s 开始/停止监控   r 立即抓取一轮   n 改间隔\n"
-                "  f 筛选   c 设置   v 视图切换   h 帮助   q 退出\n\n"
-                "[dim]按任意键返回[/]",
-                id="helptext")
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-    def on_key(self, event) -> None:
-        # 任意键关闭并拦下事件，避免冒泡再次触发应用级绑定
-        # （如按 h 关闭后又被应用重新打开）。Ctrl+C 留给应用级退出。
-        if event.key != "ctrl+c" and self.app.screen is self:
-            event.stop()
-            event.prevent_default()
-            self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
-# 筛选管理（顶部查询输入即输即滤）
-# ---------------------------------------------------------------------------
-
-class FilterScreen(ModalScreen[None]):
-    BINDINGS = [
-        Binding("escape", "close", "保存并完成"),
-        Binding("1", "group(0)", "课程名"),
-        Binding("2", "group(1)", "课程类别"),
-        Binding("3", "group(2)", "开课院系"),
-        Binding("m", "toggle_match", "组合方式"),
-        Binding("c", "add_custom", "自定义添加"),
-        Binding("d", "delete_entry", "删除条目"),
-    ]
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.group_idx = 0
-        self.entries: dict[str, list[str]] = {}
-        self.candidates: dict[str, list[str]] = {}
-        self._sync_from_cfg()
-
-    def _sync_from_cfg(self) -> None:
-        app = self._app()
-        cfg = app.cfg
-        self.entries = {
-            "names": list(cfg.filters.names),
-            "categories": list(cfg.filters.categories),
-            "depts": list(cfg.filters.depts),
-        }
-        self.candidates = {
-            "names": list(app.candidate_lists["names"]),
-            "categories": list(app.candidate_lists["categories"]),
-            "depts": list(app.candidate_lists["depts"]),
-        }
-        for g in GROUPS:
-            for e in self.entries[g[0]]:
-                if e not in self.candidates[g[0]]:
-                    self.candidates[g[0]].append(e)
-
-    def _app(self) -> "CourserApp":
-        return self.app  # type: ignore[return-value]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="filterscreen"):
-            yield Label("筛选管理 — 顶部输入，输入即过滤；回车添加/切换选中",
-                        classes="help-title")
-            yield Static(id="dim_label")
-            yield Static(id="match_label")
-            yield Input(placeholder="查询：输入即过滤；回车添加/切换选中", id="query")
-            with Horizontal(id="fsbody"):
-                yield ListView(id="cands")
-                with Vertical(id="selpanel"):
-                    yield Label("已选条目（↑↓ 选中后按 d 删除）")
-                    yield Static(id="sel_list", classes="panel")
-            yield Static(id="fs_hint", classes="hint", markup=True)
-
-    def on_mount(self) -> None:
-        self._apply_match_label()
-        self._render_dim_label()
-        self._render_list()
-        self._render_entries()
-        self.query_one("#query", Input).focus()
-        self.query_one("#fs_hint", Static).update(
-            "[dim]1/2/3 维度  ↑↓ 选择  Enter 切换选中  c 自定义  d 删除"
-            "  m 满足任一/全部条件  Esc 保存并关闭[/]")
-
-    def _group_id(self) -> str:
-        return GROUPS[self.group_idx][0]
-
-    def _query(self) -> str:
-        return self.query_one("#query", Input).value.strip()
-
-    def _filtered(self) -> list[str]:
-        q = self._query()
-        cands = self.candidates[self._group_id()]
-        if not q:
-            return list(cands)
-        return [c for c in cands if q.lower() in c.lower()]
-
-    def _render_dim_label(self) -> None:
-        self.query_one("#dim_label", Static).update(
-            "维度：[bold]1[/] 课程名 · [bold]2[/] 课程类别 · [bold]3[/] 开课院系"
-            f"（当前 [bold]{GROUPS[self.group_idx][1]}[/]）")
-
-    def _render_list(self) -> None:
-        lv = self.query_one("#cands", ListView)
-        items = self._filtered()
-        entries = set(self.entries[self._group_id()])
-        lv.clear()
-        for it in items:
-            mark = "✓ " if it in entries else "  "
-            lv.append(ListItem(Label(mark + it)))
-        if items and (lv.index is None or lv.index >= len(items)):
-            lv.index = len(items) - 1 if lv.index is not None else 0
-
-    def _render_entries(self) -> None:
-        lines = []
-        for gid, gname in GROUPS:
-            es = self.entries[gid]
-            lines.append(f"[bold]{gname}[/] ({len(es)})")
-            for e in es:
-                lines.append(f"  {e}")
-        self.query_one("#sel_list", Static).update("\n".join(lines) or "[dim]（空）[/]")
-
-    def _toggle(self, value: str) -> None:
-        gid = self._group_id()
-        if value in self.entries[gid]:
-            self.entries[gid].remove(value)
-        else:
-            self.entries[gid].append(value)
-        self._render_list()
-        self._render_entries()
-
-    # -- 事件 -------------------------------------------------------------
-    @on(Input.Changed, "#query")
-    def _on_query_changed(self, event: Input.Changed) -> None:
-        self._render_list()
-
-    @on(Input.Submitted, "#query")
-    def _on_query_submit(self, event: Input.Submitted) -> None:
-        q = self._query()
-        if not q:
-            return
-        if (q in self.candidates[self._group_id()] or q in self.entries[self._group_id()]):
-            self._toggle(q)
-            self.query_one("#query", Input).value = ""
-        else:
-            self.action_add_custom()
-
-    @on(ListView.Selected, "#cands")
-    def _on_list_selected(self, event: ListView.Selected) -> None:
-        lv = self.query_one("#cands", ListView)
-        items = self._filtered()
-        if lv.index is not None and 0 <= lv.index < len(items):
-            self._toggle(items[lv.index])
-
-    def on_key(self, event) -> None:
-        q = self.query_one("#query", Input)
-        if q.has_focus and event.key in ("down", "up"):
-            lv = self.query_one("#cands", ListView)
-            items = self._filtered()
-            if not items:
-                event.stop()
-                return
-            if lv.index is None:
-                lv.index = 0
-            elif event.key == "down":
-                lv.action_cursor_down()
-            else:
-                lv.action_cursor_up()
-            event.stop()
-
-    # -- actions ----------------------------------------------------------
-    def action_group(self, i: str) -> None:
-        self.group_idx = int(i) % len(GROUPS)
-        self._render_dim_label()
-        self._render_list()
-
-    def action_toggle_match(self) -> None:
-        cfg = self._app().cfg
-        cfg.filters.match = "all" if cfg.filters.match != "all" else "any"
-        self._apply_match_label()
-
-    def _apply_match_label(self) -> None:
-        mode = self._app().cfg.filters.match
-        text = ("组合方式：[bold green]满足任一条件[/]（任意一个维度满足即提醒）"
-                if mode == "any" else
-                "组合方式：[bold]满足全部条件[/]（所有非空维度都满足才提醒）")
-        self.query_one("#match_label", Static).update(text)
-
-    def action_add_custom(self) -> None:
-        q = self._query()
-        if not q:
-            return
-        gid = self._group_id()
-        if q not in self.entries[gid]:
-            self.entries[gid].append(q)
-            if q not in self.candidates[gid]:
-                self.candidates[gid].append(q)
-            self._render_list()
-            self._render_entries()
-
-    def action_delete_entry(self) -> None:
-        lv = self.query_one("#cands", ListView)
-        items = self._filtered()
-        if lv.index is not None and 0 <= lv.index < len(items):
-            value = items[lv.index]
-            gid = self._group_id()
-            if value in self.entries[gid]:
-                self.entries[gid].remove(value)
-                self._render_list()
-                self._render_entries()
-
-    def action_close(self) -> None:
-        cfg = self._app().cfg
-        cfg.filters.names = self.entries["names"]
-        cfg.filters.categories = self.entries["categories"]
-        cfg.filters.depts = self.entries["depts"]
-        cfg.save()
-        self._app().log_line("筛选条件已保存")
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
-# 首次配置向导（初次启动强制出现；之后仍可在「设置」中修改）
-# ---------------------------------------------------------------------------
-
-class FirstRunScreen(ModalScreen[None]):
-    BINDINGS = [
-        Binding("escape", "later", "稍后再说"),
-        Binding("1", "go_settings", "前往设置"),
-        Binding("2", "done", "已完成配置"),
-    ]
-
-    def _app(self) -> "CourserApp":
-        return self.app  # type: ignore[return-value]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="firstrunbox"):
-            yield Label("首次使用 courser — 请先完成两项配置", classes="help-title")
-            yield Static(
-                "开始监控前需要先配置好以下内容（以后仍可在「设置」中修改）：\n\n"
-                "1. gws（Google Workspace CLI）——负责发送提醒邮件\n"
-                "   安装并授权：\n"
-                "     brew install gws     （或 npm i -g @googleworkspace/cli）\n"
-                "     gws auth login       （浏览器完成 OAuth2 授权，仅一次）\n\n"
-                "2. 在「设置」中填写：\n"
-                "   · 收件邮箱 —— 提醒邮件发送到的地址\n"
-                "   · gws 发件账号（你的 Gmail，可选）\n"
-                "   建议顺手用 ctrl+t 发送测试邮件验证。\n\n"
-                "（学号/密码、筛选条件、轮询间隔也都在「设置」中；\n"
-                "   学号/密码留空则依赖浏览器密码管理器自动填充。）\n\n"
-                "[dim]1 前往设置   2 我已配置完成   Esc 稍后再说[/]",
-                id="firstruntext")
-
-    def action_go_settings(self) -> None:
-        self._app().action_open_settings()
-
-    def action_done(self) -> None:
-        self._app().cfg.first_run_done = True
-        self._app().cfg.save()
-        self._app().log_line("首次配置完成，可以开始监控了")
-        self.dismiss(None)
-
-    def action_later(self) -> None:
-        self._app().log_line("提示：完成配置前无法启动监控（gws + 收件邮箱）")
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
-# 设置（唯一入口：所有配置集中在此）
-# ---------------------------------------------------------------------------
-
-class SettingsScreen(ModalScreen[None]):
-    BINDINGS = [
-        Binding("escape", "cancel", "取消"),
-        Binding("ctrl+s", "save", "保存"),
-        Binding("ctrl+t", "test_mail", "测试邮件"),
-        Binding("w", "cycle_window", "窗口模式"),
-        Binding("o", "cycle_match", "筛选组合"),
-        Binding("r", "toggle_relogin", "强制重登"),
-    ]
-
-    def _app(self) -> "CourserApp":
-        return self.app  # type: ignore[return-value]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="settingsbox"):
-            yield Label("设置 — 所有配置集中在此处", classes="help-title")
-            yield Static("tab 切换字段 · w 窗口 · o 组合 · r 强制重登 · "
-                         "ctrl+t 测试邮件 · ctrl+s 保存 · esc 取消", id="set_hint")
-            with VerticalScroll(id="setscroll"):
-                yield Label("账号凭据（可选；留空则依赖浏览器密码管理器自动填充）",
-                            classes="section")
-                with Horizontal(classes="row"):
-                    yield Label("学号", classes="field_label")
-                    yield Input(id="set_user")
-                with Horizontal(classes="row"):
-                    yield Label("密码", classes="field_label")
-                    yield Input(id="set_pass", password=True)
-
-                yield Label("邮件通知（通过 gws 发送，需先 `gws auth login` 授权）",
-                            classes="section")
-                yield Static(id="set_gws_status", classes="hint")
-                with Horizontal(classes="row"):
-                    yield Label("收件邮箱", classes="field_label")
-                    yield Input(id="set_to")
-                with Horizontal(classes="row"):
-                    yield Label("gws 发件账号", classes="field_label")
-                    yield Input(id="set_gws_from")
-                with Horizontal(classes="row"):
-                    yield Label("每小时最多发送", classes="field_label")
-                    yield Input(id="set_mail_limit")
-                with Horizontal(classes="row"):
-                    yield Label("同课通知冷却（分钟）", classes="field_label")
-                    yield Input(id="set_mail_cooldown")
-
-                yield Label("轮询节奏（自动带随机抖动）", classes="section")
-                with Horizontal(classes="row"):
-                    yield Label("轮询间隔（分钟）", classes="field_label")
-                    yield Input(id="set_interval")
-                with Horizontal(classes="row"):
-                    yield Label("间隔抖动（0~1）", classes="field_label")
-                    yield Input(id="set_jitter")
-                with Horizontal(classes="row"):
-                    yield Label("翻页间隔下限（秒）", classes="field_label")
-                    yield Input(id="set_pd_min")
-                with Horizontal(classes="row"):
-                    yield Label("翻页间隔上限（秒）", classes="field_label")
-                    yield Input(id="set_pd_max")
-
-                yield Label("行为", classes="section")
-                with Horizontal(classes="row"):
-                    yield Label("opencli 会话名", classes="field_label")
-                    yield Input(id="set_session")
-                yield ToggleRow("浏览器窗口", [
-                    ("后台窗口（不抢焦点）", "background"),
-                    ("前台窗口", "foreground")], "background", id="tgl_window")
-                yield ToggleRow("筛选组合", [
-                    ("满足任一条件", "any"), ("满足全部条件", "all")], "any", id="tgl_match")
-                yield ToggleRow("每轮强制重新登录", [
-                    ("关", "off"), ("开", "on")], "off", id="tgl_relogin")
-
-    def on_mount(self) -> None:
-        cfg = self._app().cfg
-        c, n = cfg.credentials, cfg.notify
-        self.query_one("#set_user", Input).value = c.username
-        self.query_one("#set_pass", Input).value = c.password
-        gws_ok = "已安装" if notifier.gws_available() else "未找到 gws 命令"
-        self.query_one("#set_gws_status", Static).update(
-            f"gws 状态：{gws_ok}（安装后执行 gws auth login 授权）")
-        self.query_one("#set_to", Input).value = n.to
-        self.query_one("#set_gws_from", Input).value = n.gws_from
-        self.query_one("#set_mail_limit", Input).value = str(n.max_per_hour)
-        self.query_one("#set_mail_cooldown", Input).value = str(n.min_interval_min)
-        self.query_one("#set_interval", Input).value = str(cfg.interval_min)
-        self.query_one("#set_jitter", Input).value = str(cfg.interval_jitter)
-        self.query_one("#set_pd_min", Input).value = str(cfg.page_delay_min)
-        self.query_one("#set_pd_max", Input).value = str(cfg.page_delay_max)
-        self.query_one("#set_session", Input).value = cfg.session
-        self.query_one("#tgl_window", ToggleRow).set_value(cfg.window)
-        self.query_one("#tgl_match", ToggleRow).set_value(cfg.filters.match)
-        self.query_one("#tgl_relogin", ToggleRow).set_value(
-            "on" if cfg.force_relogin else "off")
-
-    def _float(self, iid: str, default: float) -> float:
-        try:
-            return float(self.query_one(iid, Input).value.strip())
-        except ValueError:
-            return default
-
-    def _apply(self) -> None:
-        cfg = self._app().cfg
-        cfg.credentials.username = self.query_one("#set_user", Input).value.strip()
-        cfg.credentials.password = self.query_one("#set_pass", Input).value
-        n = cfg.notify
-        n.to = self.query_one("#set_to", Input).value.strip()
-        n.gws_from = self.query_one("#set_gws_from", Input).value.strip()
-        n.max_per_hour = max(1, int(self._float("#set_mail_limit", 5)))
-        n.min_interval_min = self._float("#set_mail_cooldown", 15.0)
-        cfg.interval_min = self._float("#set_interval", 8.0)
-        cfg.interval_jitter = self._float("#set_jitter", 0.4)
-        cfg.page_delay_min = self._float("#set_pd_min", 6.0)
-        cfg.page_delay_max = self._float("#set_pd_max", 14.0)
-        cfg.session = self.query_one("#set_session", Input).value.strip() or "courser-watch"
-        cfg.window = self.query_one("#tgl_window", ToggleRow).value
-        cfg.filters.match = self.query_one("#tgl_match", ToggleRow).value
-        cfg.force_relogin = self.query_one("#tgl_relogin", ToggleRow).value == "on"
-        cfg.first_run_done = True
-        cfg.save()
-
-    def action_save(self) -> None:
-        self._apply()
-        self._app().log_line("设置已保存，首次配置完成")
-        self.dismiss(None)
-        self._app()._maybe_close_first_run()
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_test_mail(self) -> None:
-        self._apply()
-        cfg = self._app().cfg
-        self._app().log_line("正在发送测试邮件…")
-        ok = notifier.send_email(cfg.notify, "【courser】测试邮件",
-                                 "这是 courser 发送的测试邮件。收到说明邮件通知配置正常。",
-                                 log=self._app().log_line)
-        if ok:
-            self._app().notify("测试邮件已发送", timeout=5)
-
-    def _toggle_row(self, iid: str) -> ToggleRow:
-        return self.query_one(iid, ToggleRow)
-
-    def action_cycle_window(self) -> None:
-        self._toggle_row("#tgl_window").cycle()
-
-    def action_cycle_match(self) -> None:
-        self._toggle_row("#tgl_match").cycle()
-
-    def action_toggle_relogin(self) -> None:
-        self._toggle_row("#tgl_relogin").cycle()
-
-
-# ---------------------------------------------------------------------------
-# 修改轮询间隔的小弹窗
-# ---------------------------------------------------------------------------
-
-class IntervalModal(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "cancel", "取消")]
-
-    def __init__(self, current: float, on_submit) -> None:
-        super().__init__()
-        self.current = current
-        self.on_submit = on_submit
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="intervalbox"):
-            yield Label(f"修改轮询间隔（分钟，当前 {self.current}）")
-            yield Input(placeholder="新间隔（分钟）", id="interval_input")
-            yield Static("[dim]回车确认 · esc 取消[/]", classes="hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#interval_input", Input).focus()
-
-    @on(Input.Submitted, "#interval_input")
-    def _submitted(self, event: Input.Submitted) -> None:
-        self.on_submit(event.value)
-        self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
-# 主应用
-# ---------------------------------------------------------------------------
 
 class CourserApp(App):
+    """纯文本菜单 TUI：主页面 + 筛选/设置/日志/帮助/详情/首启设置。"""
+
     TITLE = "courser"
     SUB_TITLE = "PKU 补退选空余名额监控"
-    CSS = APP_CSS
-    BINDINGS = [
-        # 应用级高优先级绑定：即使焦点在 Input 或任一 ModalScreen 中也可退出。
-        Binding("ctrl+c", "quit", "退出", show=False, priority=True),
-        Binding("s", "toggle_monitor", "开始/停止"),
-        Binding("r", "run_round", "立即抓取"),
-        Binding("n", "set_interval_dialog", "间隔"),
-        Binding("f", "open_filters", "筛选"),
-        Binding("c", "open_settings", "设置"),
-        Binding("h", "open_help", "帮助"),
-        Binding("v", "toggle_view", "视图"),
-        Binding("q", "quit", "退出"),
-    ]
-
-    VIEWS = ["all", "matched", "seats"]
-    VIEW_NAMES = {"all": "全部课程", "matched": "符合筛选 · 按类别", "seats": "有空余名额"}
+    CSS = CSS
+    BINDINGS = [Binding("ctrl+c", "quit", "退出", show=False, priority=True)]
 
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
+        self.page = "main"
+        self.log_buf: list[str] = []
         self.courses: list[Course] = []
+        self.snapshot_meta = ""
         self.snapshot_ts: Optional[str] = None
         self.candidate_lists = {"names": [], "categories": [], "depts": []}
-        self.view = "all"
         self.watcher: Optional[Watcher] = None
-        self._table_layout = ""
+        # 主页面课程视图 & 光标
+        self.view = "all"
+        self.c_idx = 0
+        self.c_top = 0
+        # 筛选页状态
+        self.f_dim = 0
+        self.f_idx = 0
+        self.f_top = 0
+        # settings draft 与行索引
+        self.sd: dict[str, str] = {}
+        self.s_rows: list[tuple[str, dict]] = []
+        self.s_idx = 0
+        # 单行输入编辑态
+        self._editing: Optional[str] = None   # None / settings / setup / filters-commit?
+        self._editing_key: Optional[str] = None
+        self._editing_label = ""
+        self._init_rows()
         self._load_snapshot()
 
-    # -- 数据持久化 -------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 数据 / 字段
+    # ------------------------------------------------------------------
+    def _init_rows(self) -> None:
+        for _g, fields in SETTINGS_FIELDS:
+            for f in fields:
+                self.s_rows.append((_g, f))
+        # 默认 draft 值（打开设置页时刷新）
+        self.sd = {f["key"]: "" for _g, f in self.s_rows}
+
     def _load_snapshot(self) -> None:
         for p in (Path("data/last_round.json"), Path("data/courses_snapshot.json")):
             if p.exists():
@@ -706,6 +247,9 @@ class CourserApp(App):
                     self.courses = [Course(**{k: v for k, v in c.items()})
                                     for c in d.get("courses", [])]
                     self.snapshot_ts = d.get("ts")
+                    pages, n = d.get("pages"), d.get("n")
+                    self.snapshot_meta = (f"{pages} 页 · {n} 门课程"
+                                          if pages is not None else "")
                     du = d.get("distinct")
                     if du:
                         self.candidate_lists = {k: list(v) for k, v in du.items()}
@@ -720,243 +264,920 @@ class CourserApp(App):
             "depts": sorted({c.dept for c in r.courses if c.dept}),
         }
         self.candidate_lists = distinct
-        d = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "pages": r.pages,
-             "n": len(r.courses), "distinct": distinct,
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.snapshot_ts = ts
+        self.snapshot_meta = f"{r.pages} 页 · {len(r.courses)} 门课程"
+        d = {"ts": ts, "pages": r.pages, "n": len(r.courses), "distinct": distinct,
              "courses": [c.__dict__ for c in r.courses]}
         Path("data").mkdir(exist_ok=True)
         Path("data/last_round.json").write_text(
             json.dumps(d, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
-    # -- 日志（线程安全） -------------------------------------------------
+    # ------------------------------------------------------------------
+    # 日志（环形缓冲；落盘由 watcher 负责）
+    # ------------------------------------------------------------------
     def log_line(self, msg: str) -> None:
-        try:
-            self.query_one("#log", RichLog).write(f"{time.strftime('%H:%M:%S')}  {msg}")
-        except Exception:
-            pass
+        line = f"{time.strftime('%H:%M:%S')}  {msg}"
+        self.log_buf.append(line)
+        if len(self.log_buf) > 1200:
+            self.log_buf = self.log_buf[-1200:]
+        self._render_log()
+        if self.page == "main":
+            self._render_main_lite()
 
     def _thread_log(self, msg: str) -> None:
         self.call_from_thread(self.log_line, msg)
 
-    # -- UI --------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 状态文本
+    # ------------------------------------------------------------------
+    def _last_round_text(self) -> str:
+        r = self.watcher.last_result if self.watcher else None
+        if r is None:
+            return "—"
+        if r.ok:
+            return f"{r.pages}页/{r.total}课 {r.duration_s:.0f}s [green]成功[/]"
+        return f"[red]失败[/] {escape(r.error or '')}"
+
+    def _mail_text(self) -> str:
+        if not notifier.gws_available():
+            return "gws [yellow]未安装[/]"
+        if not self.cfg.notify.to:
+            return "收件邮箱 [yellow]未填写[/]"
+        return "[green]✓ 已就绪[/]"
+
+    def _monitor_summary(self) -> list[str]:
+        w = self.watcher
+        lines = []
+        if w and w.running:
+            cd = "--"
+            if w.countdown_s is not None:
+                m, s = divmod(w.countdown_s, 60)
+                cd = f"[cyan]{m} 分 {s} 秒[/]"
+            lines.append(f"[bold green]● 监控中[/]        下一轮 {cd}")
+        else:
+            lines.append("[dim]未开始[/]            [dim]按空格开始监控[/]")
+        lines.append(f"上一轮      {self._last_round_text()}")
+        fs = self.cfg.filters
+        if fs.empty:
+            lines.append("筛选        [dim]未配置（不会告警）· 按 f 配置[/]")
+        else:
+            gs = " · ".join(f"{n}×{len(v)}" for n, v in fs.active_groups)
+            mode = "任一" if fs.match != "all" else "全部"
+            lines.append(f"筛选        [cyan]{gs}[/] · 满足{mode}条件")
+        lines.append(f"通知        {self._mail_text()}")
+        if w and w.last_result:
+            risk = _risk_text(w.last_result.risk_percent, w.last_result.risk_label)
+            if risk:
+                lines.append(risk)
+        return lines
+
+    def _event_line(self) -> str:
+        if not self.log_buf:
+            return ""
+        raw = self.log_buf[-1]
+        body = raw.split("  ", 1)[-1] if "  " in raw else raw
+        if "✗" in body or "失败" in body or "异常" in body:
+            color = "red"
+        elif "⚠" in body or "风控" in body:
+            color = "yellow"
+        elif "已发送" in body or "成功" in body or "完成" in body or "✓" in body:
+            color = "green"
+        else:
+            color = "default"
+        return f"[{color}]{escape(body)}[/]"
+
+    # ------------------------------------------------------------------
+    # 课程行 / 自适应列
+    # ------------------------------------------------------------------
+    def _visible_rows(self) -> list[Course]:
+        fs = FilterSet(self.cfg.filters)
+        rows = self.courses
+        if self.view == "matched":
+            rows = [c for c in rows if fs.matches(c)]
+        elif self.view == "seats":
+            rows = [c for c in rows if c.has_seats]
+        return rows
+
+    def _columns(self, W: int) -> list[tuple[str, str, int]]:
+        """按可用宽度 W 贪心选列：页/课程号/限选/空余必保，其余依次挤入，
+        课程名列吸收剩余宽度 —— 窄屏自动缩列、只截断课程名，宽屏补全字段。"""
+        pre = [("page", "页", 3), ("no", "课程号", 10)]
+        fixed = [("seats", "限/选", 7), ("avail", "空余", 6)]
+        opt = [("cat", "课程类别", 20), ("dept", "开课单位", 16),
+               ("teacher", "教师", 12), ("status", "状态", 8)]
+        # 已占：必保列 + 每列间 1 空格 + 左侧光标区 3
+        used = sum(w for _k, _l, w in pre + fixed) + \
+            (len(pre) + len(fixed) - 1) + 3
+        budget = max(6, W - used)
+        picked: list[tuple[str, str, int]] = []
+        for key, label, width in opt:
+            if width + 1 <= budget:
+                picked.append((key, label, width))
+                budget -= width + 1
+        name_w = budget
+        cols: list[tuple[str, str, int]] = []
+        for k, l, w in pre:
+            cols.append((k, l, w))
+        cols.append(("name", "课程", name_w))
+        cols.extend(picked)
+        cols.extend(fixed)
+        return cols
+
+    def _header_labels(self, cols) -> str:
+        cells = [_pad(l, w) for _k, l, w in cols]
+        return f"[bold]{' '.join(cells)}[/]"
+
+    def _row_body(self, c: Course, matched: bool, cols) -> str:
+        cells: list[str] = []
+        for key, _l, w in cols:
+            if key == "page":
+                cells.append(_pad(str(c.page) if c.page else "—", w))
+            elif key == "no":
+                cells.append(_pad(escape(c.course_no or ""), w))
+            elif key == "name":
+                body_w = max(1, w - (4 if matched else 0))  # 为 ★ 前缀留位
+                name = _pad(escape(c.name or ""), body_w)
+                if matched:
+                    name = f"[cyan]★[/] {name}"
+                cells.append(name)
+            elif key == "cat":
+                cells.append(_pad(escape(c.category or ""), w))
+            elif key == "dept":
+                cells.append(_pad(escape(c.dept or ""), w))
+            elif key == "teacher":
+                cells.append(_pad(escape(c.teacher or ""), w))
+            elif key == "seats":
+                cells.append(_pad(c.seats_raw or
+                                  (f"{c.selected}/{c.quota}"
+                                   if c.quota is not None else "—"), w))
+            elif key == "avail":
+                avail = "—" if c.avail < 0 else str(c.avail)
+                st = "green" if c.has_seats else "dim"
+                cells.append(f"[{st}]{_pad(avail, w)}[/]")
+            elif key == "status":
+                cells.append(f"[dim]{_pad(escape(c.status or ''), w)}[/]")
+        return " ".join(cells).rstrip()
+
+    # ------------------------------------------------------------------
+    # compose / 生命周期
+    # ------------------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield Static("courser", id="app_title")
-        yield Static("PKU course vacancy monitor · /help for commands", id="context")
-        yield Static(id="status")
-        with Vertical(id="workspace"):
-            yield Static(id="welcome", markup=True)
-            yield DataTable(id="table")
-            yield RichLog(id="log", highlight=True, markup=False, wrap=True)
-        yield ComposerInput(placeholder="输入命令，例如 /start；输入 /help 查看全部命令",
-                            id="composer")
-        yield Static("s 开始/停止 · r 抓取 · f 筛选 · c 设置 · n 间隔 · v 视图 · q 退出",
-                     id="composer_hint")
+        yield FocusableStatic("", id="brand")
+        with Vertical(id="stage"):
+            # 主页
+            with Vertical(id="page-main"):
+                yield Static("", id="summary", markup=True)
+                yield Static("", id="coursehead", markup=True)
+                yield Static("", id="courselist", markup=True)
+                yield Static("", id="event", markup=True)
+            # 筛选（纯列表，无常驻输入框）
+            with Vertical(id="page-filters"):
+                yield Static("", id="filters_hdr", markup=True)
+                yield Static("", id="filters_list", markup=True)
+            # 设置
+            with Vertical(id="page-settings"):
+                yield Static("", id="settings_hdr", markup=True)
+                yield Static("", id="settings_list", markup=True)
+                with Horizontal(id="seditrow"):
+                    yield Static("", id="sedit_label", classes="inlabel")
+                    yield Input(id="sedit_input")
+            # 日志
+            with Vertical(id="page-logs"):
+                with FocusScroll(id="logscroll"):
+                    yield Static("", id="logbody", markup=True)
+            # 帮助
+            with Vertical(id="page-help"):
+                with FocusScroll(id="helpscroll"):
+                    yield Static("", id="helpbody", markup=True)
+            # 课程详情
+            with Vertical(id="page-detail"):
+                with FocusScroll(id="detscroll"):
+                    yield Static("", id="detbody", markup=True)
+            # 首次设置
+            with Vertical(id="page-setup"):
+                yield Static("", id="setupbody", markup=True)
+                with Horizontal(id="setupeditrow"):
+                    yield Static("", id="setupedit_label", classes="inlabel")
+                    yield Input(id="setup_input")
+        yield Static("", id="keys")
+        yield Static("", id="runstate")
 
     def on_mount(self) -> None:
         self.watcher = Watcher(self.cfg, log=self._thread_log, on_round=self._on_round)
-        self._setup_table()
-        self.render_table()
-        self._apply_responsive_layout(self.size.width, self.size.height)
-        self.set_interval(1.0, self._tick)
-        self.log_line(f"启动：筛选 {FilterSet(self.cfg.filters).describe()}")
-        self.log_line("就绪：输入 /help 查看命令；快捷键仍然可用。")
-        self.call_after_refresh(self._maybe_first_run)
-
-    def _maybe_first_run(self) -> None:
-        if not self.cfg.first_run_done and not isinstance(self.screen, FirstRunScreen):
-            self.push_screen(FirstRunScreen())
-            self.log_line("首次使用：请先完成配置（gws + 收件邮箱）")
-
-    def _maybe_close_first_run(self) -> None:
-        if isinstance(self.screen, FirstRunScreen) and self.cfg.first_run_done:
-            self.pop_screen()
-
-    def _setup_table(self) -> None:
-        self._configure_table(force=True)
-
-    def _table_layout_for_width(self, width: int) -> str:
-        if width < 48:
-            return "tiny"
-        if width < 72:
-            return "compact"
-        if width < 118:
-            return "normal"
-        return "wide"
-
-    def _configure_table(self, force: bool = False, width: Optional[int] = None) -> bool:
-        """按当前终端宽度重建列，避免 DataTable 横向挤压。"""
-        layout = self._table_layout_for_width(width if width is not None else self.size.width)
-        if not force and layout == self._table_layout:
-            return False
-        dt = self.query_one("#table", DataTable)
-        dt.clear(columns=True)
-        for key, label, width in TABLE_LAYOUTS[layout]:
-            dt.add_column(label, key=key, width=width)
-        self._table_layout = layout
-        return True
-
-    def render_table(self) -> None:
-        dt = self.query_one("#table", DataTable)
-        dt.clear()
-        welcome = self.query_one("#welcome", Static)
-        if not self.courses:
-            welcome.update(
-                "[bold]欢迎使用 courser[/]\n\n"
-                "监控北京大学补退选课程的空余名额，并在符合筛选条件时通知你。\n\n"
-                "[cyan]/start[/] 开始监控    [cyan]/fetch[/] 立即抓取一轮\n"
-                "[cyan]/filters[/] 设置课程筛选    [cyan]/settings[/] 配置账号、邮件与节奏\n\n"
-                "结果会显示在这里；运行过程会像对话记录一样保留在下方。")
-            welcome.display = True
-            dt.display = False
-            return
-        welcome.display = False
-        dt.display = True
-        fs = FilterSet(self.cfg.filters)
-        columns = [key for key, _label, _width in TABLE_LAYOUTS[self._table_layout]]
-        # 命中视图：最近一次成功抓取中经过筛选的课程（不限空余），按课程类别排序
-        rows = list(self.courses)
-        if self.view == "matched":
-            rows = [c for c in rows if fs.matches(c)]
-            rows.sort(key=lambda c: c.category)  # 稳定排序：同类别保持选课网顺序
-        elif self.view == "seats":
-            rows = [c for c in rows if c.has_seats]
-        for c in rows:
-            matched = fs.matches(c)
-            seats = Text(f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw)
-            avail = Text(str(c.avail), style="bold green" if c.has_seats else "dim red")
-            name = Text(("★ " if matched else "") + c.name,
-                        style="bold" if matched else "default")
-            values = {
-                "no": c.course_no, "name": name, "cat": c.category, "dept": c.dept,
-                "teacher": c.teacher, "seats": seats, "avail": avail, "status": c.status,
-                "page": str(c.page) if c.page else "—",
-            }
-            dt.add_row(*(values[column] for column in columns), key=c.key)
+        self._reset_runstate_interval()
+        self._show("main")
+        self._render_status_ticker()
+        if not self.cfg.first_run_done:
+            self.log_line("首次使用：请先完成配置（gws 授权 + 收件邮箱）")
+            self._show("setup")
 
     def on_resize(self, event: events.Resize) -> None:
-        """随终端尺寸在四档表格、状态文字与垂直空间间切换。"""
         if not self.is_mounted:
             return
-        self._apply_responsive_layout(event.size.width, event.size.height)
+        self._render_current()
 
-    def _apply_responsive_layout(self, width: int, height: int) -> None:
-        """应用与尺寸无关的重排逻辑，供挂载和 resize 事件共用。"""
-        if self._configure_table(width=width):
-            self.render_table()
+    # ------------------------------------------------------------------
+    # 页面切换
+    # ------------------------------------------------------------------
+    HINTS = {
+        "main": "[cyan]空格[/] 开始/停止 · [cyan]r[/] 立即抓取 · "
+                "[cyan]1/2/3[/] 全部/筛选/空余 · [cyan]f[/] 筛选 · "
+                "[cyan]s[/] 设置 · [cyan]l[/] 日志 · [cyan]h[/] 帮助 · "
+                "[cyan]q[/] 退出",
+        "filters": "[cyan]Tab[/] 切维度 · [cyan]↑↓[/] 移动 · [cyan]空格[/] 选中/取消 · "
+                   "[cyan]回车[/] 保存并返回 · [cyan]Esc[/] 放弃并返回",
+        "settings": "[cyan]↑↓[/] 选择 · [cyan]←/→[/] 切换选项 · [cyan]回车[/] 编辑 · "
+                    "[cyan]t[/] 测试邮件 · [cyan]ctrl+s[/] 保存 · [cyan]Esc[/] 放弃",
+        "logs": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
+        "help": "[cyan]↑↓[/] 滚动 · [cyan]Esc[/] 返回主页",
+        "detail": "[cyan]Esc[/] 返回主页",
+        "setup": "[cyan]↑↓[/] 选择 · [cyan]回车[/] 编辑/继续 · [cyan]Esc[/] 退出程序",
+    }
 
-        self.query_one("#log", RichLog).styles.height = max(4, min(10, height // 3))
-        self.query_one("#composer_hint", Static).display = height >= 16
-        self.query_one("#context", Static).display = width >= 56 and height >= 14
-        self.query_one("#app_title", Static).update(
-            "courser" if width >= 40 else "courser · /help")
-        hint = self.query_one("#composer_hint", Static)
-        hint.update(
-            "s 开始/停止 · r 抓取 · f 筛选 · c 设置 · n 间隔 · v 视图 · q 退出"
-            if width >= 72 else "s 监控 · r 抓取 · f 筛选 · c 设置 · /help")
+    def _page_ids(self):
+        return ["main", "filters", "settings", "logs", "help", "detail", "setup"]
 
-        welcome = self.query_one("#welcome", Static)
-        if not self.courses:
-            welcome.update(
-                "[bold]欢迎使用 courser[/]\n\n[cyan]/start[/] 开始监控  [cyan]/fetch[/] 立即抓取\n"
-                "[cyan]/filters[/] 筛选  [cyan]/settings[/] 设置"
-                if height < 18 or width < 56 else
-                "[bold]欢迎使用 courser[/]\n\n"
-                "监控北京大学补退选课程的空余名额，并在符合筛选条件时通知你。\n\n"
-                "[cyan]/start[/] 开始监控    [cyan]/fetch[/] 立即抓取一轮\n"
-                "[cyan]/filters[/] 设置课程筛选    [cyan]/settings[/] 配置账号、邮件与节奏\n\n"
-                "结果会显示在这里；运行过程会像对话记录一样保留在下方。"
-            )
+    def _anchor_focus(self) -> None:
+        """把焦点放到顶部惰性锚（不消费任何键），让页面键路由接管。"""
+        try:
+            self.query_one("#brand", FocusableStatic).focus()
+        except Exception:
+            self.set_focus(None)
 
-    # -- composer / events ------------------------------------------------
-    @on(Input.Submitted, "#composer")
-    def _on_command(self, event: Input.Submitted) -> None:
-        raw = event.value.strip()
-        composer = self.query_one("#composer", Input)
-        composer.value = ""
-        if not raw:
+    def _show(self, page: str, *_a, **_k) -> None:
+        self.page = page
+        for pid in self._page_ids():
+            self.query_one(f"#page-{pid}", Vertical).display = (pid == page)
+        if page == "filters":
+            self._begin_filters()
+            self._anchor_focus()
+        elif page == "settings":
+            self._open_settings()
+            self._anchor_focus()
+        elif page == "logs":
+            self._render_log()
+            self.query_one("#logscroll", FocusScroll).focus()
+        elif page == "help":
+            self._render_help()
+            self.query_one("#helpscroll", FocusScroll).focus()
+        elif page == "detail":
+            self._render_detail()
+            self._anchor_focus()
+        elif page == "setup":
+            self._render_setup()
+            self._anchor_focus()
+        else:
+            self._anchor_focus()
+            self._render_main(force=True)
+        self.query_one("#keys", Static).update(self.HINTS[page])
+        self._render_runstate()
+
+    def _render_current(self) -> None:
+        p = self.page
+        if p == "main":
+            self._render_main(force=True)
+        elif p == "filters":
+            self._render_filters_list()
+        elif p == "settings":
+            self._render_settings_list()
+        elif p == "logs":
+            self._render_log()
+        elif p == "help":
+            pass
+        elif p == "detail":
+            self._render_detail()
+        elif p == "setup":
+            self._render_setup()
+        self._render_runstate()
+
+    # ------------------------------------------------------------------
+    # 渲染：主页
+    # ------------------------------------------------------------------
+    def _clear_editing(self) -> None:
+        self._editing = None
+        self._editing_key = None
+        self.query_one("#seditrow", Horizontal).display = False
+        self.query_one("#setupeditrow", Horizontal).display = False
+        # 焦点还给惰性锚，避免停在隐藏输入行上吞键
+        self._anchor_focus()
+
+    def _render_main(self, force: bool = False) -> None:
+        if not force and self.page != "main":
             return
-        command, _, arg = raw.lower().partition(" ")
-        aliases = {
-            "/start": self.action_toggle_monitor,
-            "/stop": self.action_toggle_monitor,
-            "/fetch": self.action_run_round,
-            "/filters": self.action_open_filters,
-            "/settings": self.action_open_settings,
-            "/view": self.action_toggle_view,
-            "/help": self.action_open_help,
-            "/quit": self.action_quit,
-        }
-        if command in {"/interval", "/every"}:
-            if arg:
-                self._set_interval(arg)
-            else:
-                self.action_set_interval_dialog()
+        self.query_one("#brand", Static).update(
+            "[bold]courser[/][dim] — PKU 补退选空余名额监控[/]")
+        W = max(40, self.size.width - 4)
+        # 标题栏：视图选择 + 快照元信息
+        meta = ""
+        if self.snapshot_ts:
+            meta = f"[dim]最近一次：{escape(self.snapshot_ts)}"
+            if self.snapshot_meta:
+                meta += f" · {escape(self.snapshot_meta)}"
+            meta += "[/]"
+        head = "课程   "
+        head += " ".join(
+            [("[bold cyan]1 全部[/]" if self.view == "all" else "[dim]1 全部[/]"),
+             ("[bold cyan]2 符合筛选[/]" if self.view == "matched" else "[dim]2 符合筛选[/]"),
+             ("[bold cyan]3 只看空余[/]" if self.view == "seats" else "[dim]3 只看空余[/]")])
+        if meta:
+            head += f"   {meta}"
+        self.query_one("#coursehead", Static).update(head)
+        summary = "\n".join(self._monitor_summary())
+        self.query_one("#summary", Static).update(summary)
+
+        rows = self._visible_rows()
+        avail_h = max(1, self.size.height - 18)
+        self._render_course_window(rows, avail_h)
+        ev = self._event_line()
+        self.query_one("#event", Static).update(ev if ev else "")
+
+    def _render_main_lite(self) -> None:
+        """主页的轻量刷新（事件/运行状态行），不做整页重排。"""
+        if self.page != "main":
             return
-        action = aliases.get(command)
-        if action:
-            if command == "/start" and self.watcher and self.watcher.running:
-                self.log_line("监控已经在运行；使用 /stop 停止。")
-            elif command == "/stop" and self.watcher and not self.watcher.running:
-                self.log_line("监控尚未启动；使用 /start 开始。")
-            else:
-                action()
+        try:
+            ev = self._event_line()
+            self.query_one("#event", Static).update(ev if ev else "")
+        except Exception:
+            pass
+        self._render_runstate()
+
+    def _render_course_window(self, rows: list[Course], avail: int) -> None:
+        body = self.query_one("#courselist", Static)
+        if not rows:
+            body.update(
+                "[dim]还没有可显示的结果。按 r 立即抓取，或按空格开始监控。[/]"
+                if not self.courses else
+                "[dim]（当前视图无课程：按 1 查看全部 / 按 2 查看符合筛选的课程）[/]")
             return
-        self.log_line(f"未识别命令：{raw}。输入 /help 查看可用命令。")
-
-    @on(DataTable.RowSelected, "#table")
-    def _row_selected(self, event: DataTable.RowSelected) -> None:
-        key = event.row_key.value
-        for c in self.courses:
-            if c.key == key:
-                self.log_line(f"选中：{c.name} [{c.course_no}] {c.category} {c.dept} "
-                              f"限/选 {c.seats_raw} 状态 {c.status}")
-                break
-
-    # -- 轮询完成后回调（watcher 线程 → UI） ------------------------------
-    def _on_round(self, r: RoundResult) -> None:
-        self.call_from_thread(self._apply_round, r)
-
-    def _apply_round(self, r: RoundResult) -> None:
-        self.snapshot_ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        if r.ok and r.courses:
-            self.courses = r.courses
-            self._save_snapshot(r)
-        self.render_table()
-        if r.notified:
-            self.notify(f"已发送提醒邮件：{'、'.join(c.name for c in r.notified)}",
-                        severity="information", timeout=8)
-
-    # -- 定时刷新状态栏 ---------------------------------------------------
-    def _tick(self) -> None:
-        w = self.watcher
-        if w is None:
-            return
-        st = self.query_one("#status", Static)
-        run_state = "监控中" if w.running else "未开始"
-        countdown = f"{w.countdown_s}s" if w.countdown_s is not None else "--"
-        last = ""
-        if w.last_result:
-            last = (f"{w.last_result.pages}页/{w.last_result.total}课 "
-                    f"{w.last_result.duration_s:.0f}s"
-                    + (" 成功" if w.last_result.ok else " 失败"))
-        risk = "风控 --" if not w.last_result else _risk_text(w.last_result.risk_percent,
-                                                             w.last_result.risk_label)
+        if self.c_idx >= len(rows):
+            self.c_idx = len(rows) - 1
+        if self.c_idx < self.c_top:
+            self.c_top = self.c_idx
+        if self.c_idx >= self.c_top + avail:
+            self.c_top = self.c_idx - avail + 1
+        W = max(40, self.size.width - 4)
+        cols = self._columns(W)
         fs = FilterSet(self.cfg.filters)
-        n = self.cfg.notify
-        gws_txt = "gws ✓" if notifier.gws_available() else "gws ✗"
-        st.update(
-            f"{run_state} · 下一轮 {countdown} · 上一轮 {last or '—'} · {risk}"
-            f" · {self.VIEW_NAMES[self.view]} · {fs.describe()} · 邮件 {gws_txt}"
-            + (" 已配置" if n.configured and notifier.gws_available() else " 未配置"))
+        lines = []
+        lines.append(self._header_labels(cols))
+        # 名称列已并入第一段；这里给出行
+        for i in range(self.c_top, min(len(rows), self.c_top + avail)):
+            c = rows[i]
+            matched = fs.matches(c)
+            lines.append(self._course_line(c, matched, cols,
+                                           cursor=i == self.c_idx))
+        body.update("\n".join(lines))
 
-    # -- actions ----------------------------------------------------------
-    def action_toggle_monitor(self) -> None:
+    def _course_line(self, c: Course, matched: bool, cols, cursor: bool) -> str:
+        cur = "[cyan]❯[/] " if cursor else "   "
+        return cur + self._row_body(c, matched, cols)
+
+    # ------------------------------------------------------------------
+    # 渲染：筛选页
+    # ------------------------------------------------------------------
+    def _begin_filters(self) -> None:
+        self._f_backup = copy.deepcopy(self.cfg.filters)  # Esc 放弃的依据
+        self.f_dim = 0
+        self.f_idx = 0
+        self.f_top = 0
+        self._render_filters_list()
+
+    def _filters_entries(self) -> list[str]:
+        return list(getattr(self.cfg.filters, GROUPS[self.f_dim][0]))
+
+    def _filters_dim_cycle(self) -> None:
+        self.f_dim = (self.f_dim + 1) % len(GROUPS)
+        self.f_idx = 0
+        self.f_top = 0
+        self._render_filters_list()
+
+    def _filters_items(self) -> list[str]:
+        """候选 = 快照里该维度的值 + 已选但不在候选中的条目（原样保留）。"""
+        gid = GROUPS[self.f_dim][0]
+        seen = set(self.candidate_lists[gid])
+        items = list(self.candidate_lists[gid])
+        for e in getattr(self.cfg.filters, gid):
+            if e not in seen:
+                items.append(e)
+        return items
+
+    def _render_filters_list(self) -> None:
+        hdr = self.query_one("#filters_hdr", Static)
+        dim_name = GROUPS[self.f_dim][1]
+        entries = set(self._filters_entries())
+        mode = "满足任一条件" if self.cfg.filters.match != "all" else "满足全部条件"
+        hdr.update(
+            f"[bold]筛选配置[/]   维度 [cyan]Tab[/] 切换：{dim_name}"
+            f"（{len(entries)} 已选）\n"
+            f"组合方式：[cyan]{mode}[/]   [dim]↑↓ 选择 · 空格 选中/取消 · 回车 保存 · "
+            f"esc 放弃[/]")
+        items = self._filters_items()
+        listw = self.query_one("#filters_list", Static)
+        if not items:
+            listw.update("[dim]（暂无候选；抓取一轮后会自动收集课程名/类别/院系）[/]")
+            return
+        if self.f_idx >= len(items):
+            self.f_idx = len(items) - 1
+        if self.f_idx < self.f_top:
+            self.f_top = self.f_idx
+        maxlines = max(3, min(20, self.size.height - 9))
+        if self.f_idx >= self.f_top + maxlines:
+            self.f_top = self.f_idx - maxlines + 1
+        window = items[self.f_top:self.f_top + maxlines]
+        cands = set(self.candidate_lists[GROUPS[self.f_dim][0]])
+        out = []
+        for i, it in enumerate(window):
+            idx = self.f_top + i
+            cur = "[cyan]❯[/]" if idx == self.f_idx else " "
+            mark = "[cyan]✓[/]" if it in entries else " "
+            extra = " [dim](自定义)[/]" if it not in cands else ""
+            out.append(f"{cur} {mark} {escape(it)}{extra}")
+        listw.update("\n".join(out))
+
+    def _filters_move(self, step: int) -> None:
+        items = self._filters_items()
+        if not items:
+            return
+        self.f_idx = min(max(0, self.f_idx + step), len(items) - 1)
+        self._render_filters_list()
+
+    def _filters_toggle(self) -> None:
+        items = self._filters_items()
+        if not (0 <= self.f_idx < len(items)):
+            return
+        gid = GROUPS[self.f_dim][0]
+        lst = getattr(self.cfg.filters, gid)
+        value = items[self.f_idx]
+        if value in lst:
+            lst.remove(value)
+            self.log_line(f"已取消筛选：{value}")
+        else:
+            lst.append(value)
+            self.log_line(f"已添加筛选：{value}")
+        self._render_filters_list()
+
+    def _leave_filters(self, commit: bool) -> None:
+        if commit:
+            self.cfg.save()
+            self.log_line("筛选已保存")
+        else:
+            # Esc：放弃本次改动，还原到进入时的状态
+            self.cfg.filters = copy.deepcopy(getattr(self, "_f_backup", self.cfg.filters))
+            self.log_line("已放弃筛选修改")
+        self._show("main", force=True)
+
+    # ------------------------------------------------------------------
+    # 渲染：设置页（draft 事务）
+    # ------------------------------------------------------------------
+    def _enum_label_for(self, f: dict) -> str:
+        val = self.sd.get(f["key"], "")
+        for value, label in f["opts"]:
+            if value == val:
+                return label
+        return str(val)
+
+    def _draft_display(self, f: dict) -> str:
+        if f["kind"] == "password":
+            return "•" * 8 if self.sd.get(f["key"]) else "（空）"
+        if f["kind"] == "enum":
+            return self._enum_label_for(f)
+        return self.sd.get(f["key"]) or "（空）"
+
+    def _open_settings(self) -> None:
+        # 从持久化刷新 draft；进入后只改 draft，Esc 丢弃
+        for _g, f in self.s_rows:
+            self.sd[f["key"]] = _field_value(self.cfg, f["key"])
+        self.s_idx = 0
+        self._render_settings_list()
+        self.set_focus(None)
+
+    def _render_settings_list(self) -> None:
+        hdr = self.query_one("#settings_hdr", Static)
+        gws = "已安装" if notifier.gws_available() else "[yellow]未找到 gws[/]"
+        hdr.update(f"[bold]设置[/]  gws：{gws}   "
+                   "[dim]ctrl+s 保存 · t 测试邮件（不保存）[/]")
+        out = []
+        last = None
+        for i, (gname, f) in enumerate(self.s_rows):
+            if gname != last:
+                out.append(f"[bold]{escape(gname)}[/]")
+                last = gname
+            cur = "[cyan]❯[/]" if i == self.s_idx else " "
+            val = self._draft_display(f)
+            if i == self.s_idx:
+                out.append(f"{cur} {escape(f['label'])}：[cyan]{val}[/]")
+            else:
+                out.append(f"{cur} {escape(f['label'])}：[dim]{val}[/]")
+        self.query_one("#settings_list", Static).update("\n".join(out))
+
+    def _settings_move(self, step: int) -> None:
+        n = len(self.s_rows)
+        self.s_idx = min(max(0, self.s_idx + step), n - 1)
+        self._render_settings_list()
+
+    def _settings_edit(self, f: dict) -> None:
+        self._editing = "settings"
+        self._editing_key = f["key"]
+        self._editing_label = f["label"]
+        lab = self.query_one("#sedit_label", Static)
+        inp = self.query_one("#sedit_input", Input)
+        lab.update(f"✎ {escape(f['label'])}：")
+        inp.password = f["kind"] == "password"
+        inp.value = "" if f["kind"] == "password" else self.sd.get(f["key"], "")
+        self.query_one("#seditrow", Horizontal).display = True
+        inp.focus()
+
+    def _settings_cycle(self, f: dict, step: int) -> None:
+        opts = f["opts"]
+        cur = self.sd.get(f["key"])
+        idx = next((i for i, (v, _l) in enumerate(opts) if v == cur), 0)
+        nxt = (idx + step) % len(opts)
+        self.sd[f["key"]] = opts[nxt][0]
+        self.log_line(f"{f['label']} → {opts[nxt][1]}（待保存）")
+        self._render_settings_list()
+
+    def _settings_save(self) -> None:
+        # 先整体校验，再一次性写回（避免部分字段被改坏）
+        numeric = {"int": lambda v: int(float(v)),
+                   "float": lambda v: float(v)}
+        try:
+            for _g, f in self.s_rows:
+                if f["kind"] in numeric:
+                    numeric[f["kind"]](self.sd.get(f["key"], ""))
+        except ValueError:
+            self.log_line("✗ 有数字字段格式不正确，未保存")
+            return
+        try:
+            for _g, f in self.s_rows:
+                _field_mutate(self.cfg, f["key"], self.sd.get(f["key"], ""))
+            self.cfg.save()
+        except ValueError:
+            self.log_line("✗ 保存失败：数值越界/格式错误，未写入")
+            return
+        self.log_line("设置已保存")
+        self._leave_settings(commit=True)
+
+    def _leave_settings(self, commit: bool) -> None:
+        self._clear_editing()
+        if not commit:
+            self.log_line("已放弃设置修改")
+        self._show("main", force=True)
+
+    @on(Input.Submitted, "#sedit_input")
+    def _on_sedit_submit(self, event: Input.Submitted) -> None:
+        key = self._editing_key
+        val = event.value
+        self._clear_editing()
+        if key:
+            self.sd[key] = val
+        self._render_settings_list()
+        # 不在此处保存；Esc/ctrl+s 决定
+
+    # ------------------------------------------------------------------
+    # 渲染：日志页 / 帮助 / 详情 / 首启设置
+    # ------------------------------------------------------------------
+    def _render_log(self) -> None:
+        body = self.query_one("#logbody", Static)
+        if not self.log_buf:
+            body.update("[dim]（暂无日志；开始监控或抓取后这里会记录每一轮过程）[/]")
+            return
+        body.update("\n".join(escape(l) for l in self.log_buf[-300:]))
+
+    def _render_help(self) -> None:
+        self.query_one("#helpbody", Static).update(
+            "[bold]courser — PKU 补退选空余名额监控[/]\n\n"
+            "[bold]主页操作（纯键盘）[/]\n"
+            "  空格  开始 / 停止监控      r   立即抓取一轮\n"
+            "  1     全部课程            2   只看符合筛选\n"
+            "  3     只看有空余           ↑↓   浏览课程（回车看详情）\n"
+            "  f 筛选   s 设置   l 日志   h 帮助   q 退出\n\n"
+            "[bold]监控流程（每轮重新登录）[/]\n"
+            "  登出 → IAAA 登录（自动填充或设置内填学号/密码）→ 补退选\n"
+            "  → 动态翻页读限/选 → 命中且空余经 gws 发邮件；人类节奏、绝不输验证码。\n\n"
+            "[bold]筛选（f）[/]\n"
+            "  课程名 / 课程类别 / 开课院系三维度；Tab 切换维度；↑↓ 移动；\n"
+            "  空格 选中/取消；回车 保存，Esc 放弃（改动未保存前均不落盘）。\n"
+            "  主页课程列表用 ★ 标记符合筛选的课程。\n\n"
+            "[bold]设置（s）[/]\n"
+            "  账号、邮件通知、轮询节奏、行为；t 测试邮件（只用当前改动，不保存）；\n"
+            "  ctrl+s 保存，Esc 放弃。轮询间隔在「轮询节奏」里改。\n\n"
+            "[bold]日志（l）[/]\n"
+            "  完整运行过程记录，不占主页；主页只保留最近一条事件。\n\n"
+            "[bold]安全与节奏[/]\n"
+            "  轮询带随机抖动；检测到页面风控/警告语会放慢节奏并提示；\n"
+            "  出错（登录失败/验证码）自动降速，不硬顶。\n\n[dim]Esc 返回[/]")
+
+    def _render_detail(self) -> None:
+        c = self._detail_course
+        if c is None:
+            self._show("main", force=True)
+            return
+        lines = [f"[bold]{escape(c.name or '（无名称）')}[/]\n"]
+        avail = "—" if c.avail < 0 else str(c.avail)
+        lines.append(f"空余：[{'green' if c.has_seats else 'dim'}]{avail}[/]"
+                     f"[dim]  ★=符合当前筛选[/]\n")
+        for label, attr in COURSE_DETAIL_FIELDS:
+            if attr == "avail":
+                continue
+            raw = getattr(c, attr, "")
+            if attr == "course_no":
+                pass
+            val = str(raw) if raw not in (None, "") else "—"
+            if attr == "page" and not c.page:
+                val = "—"
+            lines.append(f"[dim]{_pad(label, 6)}[/] {escape(val)}")
+        lines.append(f"[dim]{_pad('空余数', 6)}[/] "
+                     f"[{'green' if c.has_seats else 'dim'}]{avail}[/]")
+        lines.append("\n[dim]按 Esc 返回主页[/]")
+        self.query_one("#detbody", Static).update("\n".join(lines))
+
+    def _render_setup(self) -> None:
+        body = self.query_one("#setupbody", Static)
+        gws = notifier.gws_available()
+        has_recip = bool(self.cfg.notify.to)
+        lines = ["[bold]首次使用 — 配置课程监控[/]\n",
+                 "先检查运行环境（opencli 驱动 Chrome、gws 发送邮件）："]
+        opencli = shutil.which("opencli")
+        lines.append("  " + ("[green]✓[/] opencli 已安装"
+                             if opencli else "[yellow]⚠ opencli 未找到（需先安装）[/]"))
+        lines.append("  " + ("[green]✓[/] gws 已安装"
+                             if gws else "[yellow]⚠ gws 未安装（brew install gws）[/]"))
+        lines.append("  " + ("[yellow]⚠ gws 尚未完成授权（执行 gws auth login）[/]"
+                             if gws else "[dim]（安装 gws 后执行 gws auth login）[/]"))
+        lines.append("")
+        lines.append("[bold]收件邮箱[/]（必填，用于接收提醒）")
+        lines.append("  " + ("[green]✓ 已填[/]  " + escape(self.cfg.notify.to)
+                             if has_recip else "[yellow]未填写[/]（↓ 选择后用回车输入）"))
+        lines.append("")
+        lines.append("学号 / 密码可留空：登录时依赖浏览器密码管理器自动填充。")
+        lines.append("  [dim]按 s 打开设置 →「账号凭据」填写[/]")
+        lines.append("")
+        if has_recip:
+            lines.append("[green]✓ 邮件通知已就绪[/]  回车开始使用；Esc 退出程序")
+        else:
+            lines.append("[yellow]请先填写收件邮箱[/] 回车继续会提醒")
+        lines.append("\n[dim]设置完成后可随时按 1 开始监控。[/]")
+        body.update("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # 首启设置：把“填邮箱”做成可编辑行，取代“按 2 我完成”
+    # ------------------------------------------------------------------
+    def _setup_edit_email(self) -> None:
+        self._editing = "setup"
+        self._editing_key = "to"
+        lab = self.query_one("#setupedit_label", Static)
+        inp = self.query_one("#setup_input", Input)
+        lab.update("✎ 收件邮箱：")
+        inp.password = False
+        inp.value = self.cfg.notify.to
+        self.query_one("#setupeditrow", Horizontal).display = True
+        inp.focus()
+
+    @on(Input.Submitted, "#setup_input")
+    def _on_setup_submit(self, event: Input.Submitted) -> None:
+        self.cfg.notify.to = event.value.strip()
+        self._clear_editing()
+        self._render_setup()
+        if self.cfg.notify.to:
+            self.log_line("收件邮箱已填写，回车开始使用")
+
+    # ------------------------------------------------------------------
+    # 运行状态行（屏幕底部）
+    # ------------------------------------------------------------------
+    def _reset_runstate_interval(self) -> None:
+        pass
+
+    def _render_runstate(self) -> None:
+        w = self.watcher
+        run = "[bold green]● 监控中[/]" if (w and w.running) else "[dim]未开始[/]"
+        cd = "--"
+        if w and w.running and w.countdown_s is not None:
+            m, s = divmod(w.countdown_s, 60)
+            cd = f"[cyan]{m}分{s:02d}秒[/]"
+        last = self._last_round_text()
+        self.query_one("#runstate", Static).update(
+            f"{run} · 下一轮 {cd} · 上一轮 {last}")
+
+    def _render_status_ticker(self) -> None:
+        self.set_interval(1.0, self._tick)
+
+    def _tick(self) -> None:
+        self._render_runstate()
+        if self.page == "main":
+            # 每轮概要里 上一轮/风控 无需秒级刷新，运行行已刷新即可
+            pass
+
+    # ------------------------------------------------------------------
+    # 键盘路由
+    # ------------------------------------------------------------------
+    def on_key(self, event: events.Key) -> None:
+        if self._editing:
+            if event.key == "escape":
+                # 放弃当前字段编辑（不退出页面、不保存）
+                self._clear_editing()
+                if self.page == "settings":
+                    self._render_settings_list()
+                elif self.page == "setup":
+                    self._render_setup()
+                event.stop()
+            return
+        k = event.key
+        page = self.page
+        if k == "q":
+            # q = 全局退出（编辑输入中 q 会作为文本输入，已在上面 return）
+            event.stop()
+            self.exit()
+            return
+
+        if page == "setup":
+            self._setup_key(k, event)
+            return
+        if page == "settings":
+            self._settings_key(k, event)
+            return
+        if page == "filters":
+            self._filters_key(k, event)
+            return
+        if page == "logs" or page == "help" or page == "detail":
+            if k == "escape":
+                event.stop()
+                self._show("main", force=True)
+            return
+        # main
+        if page == "main":
+            self._main_key(k, event)
+
+    def _filters_key(self, k: str, event: events.Key) -> None:
+        if k == "tab":
+            event.stop()
+            self._filters_dim_cycle()
+        elif k == "up":
+            event.stop()
+            self._filters_move(-1)
+        elif k == "down":
+            event.stop()
+            self._filters_move(1)
+        elif k == "space":
+            event.stop()
+            self._filters_toggle()
+        elif k == "enter":
+            event.stop()
+            self._leave_filters(commit=True)
+        elif k == "escape":
+            event.stop()
+            self._leave_filters(commit=False)
+        # 其余键（含 q/1/2/3…）在本页不生效，保持固定语义
+
+    def _main_key(self, k: str, event: events.Key) -> None:
+        if k in ("space",):
+            event.stop()
+            self._toggle_monitor()
+        elif k == "r":
+            event.stop()
+            self._run_round()
+        elif k == "1":
+            event.stop()
+            self._set_view("all")
+        elif k == "2":
+            event.stop()
+            self._set_view("matched")
+        elif k == "3":
+            event.stop()
+            self._set_view("seats")
+        elif k == "f":
+            event.stop()
+            self._show("filters")
+        elif k == "s":
+            event.stop()
+            self._show("settings")
+        elif k == "l":
+            event.stop()
+            self._show("logs")
+        elif k == "h" or k == "?" or k == "question":
+            event.stop()
+            self._show("help")
+        elif k == "q":
+            event.stop()
+            self.exit()
+        elif k == "up":
+            event.stop()
+            self._move_cursor(-1)
+        elif k == "down":
+            event.stop()
+            self._move_cursor(1)
+        elif k == "enter":
+            event.stop()
+            self._open_detail()
+
+    def _move_cursor(self, step: int) -> None:
+        rows = self._visible_rows()
+        if not rows:
+            return
+        self.c_idx = min(max(0, self.c_idx + step), len(rows) - 1)
+        avail = max(1, self.size.height - 18)
+        if self.c_idx < self.c_top:
+            self.c_top = self.c_idx
+        if self.c_idx >= self.c_top + avail:
+            self.c_top = self.c_idx - avail + 1
+        self._render_course_window(rows, avail)
+
+    def _open_detail(self) -> None:
+        rows = self._visible_rows()
+        if not rows or not (0 <= self.c_idx < len(rows)):
+            return
+        self._detail_course = rows[self.c_idx]
+        self._show("detail")
+
+    def _set_view(self, v: str) -> None:
+        if self.view != v:
+            self.view = v
+            self.c_idx = 0
+            self.c_top = 0
+            self._render_main(force=True)
+
+    def _setup_key(self, k: str, event: events.Key) -> None:
+        if k == "down":
+            event.stop()
+            self._setup_edit_email() if not self.cfg.notify.to else None
+            return
+        if k in ("enter", " "):
+            event.stop()
+            if not self.cfg.notify.to:
+                self.log_line("请先填写收件邮箱")
+                self._setup_edit_email()
+                return
+            self._finish_setup()
+        elif k == "escape":
+            event.stop()
+            self.exit()  # 审阅：首启 Esc = 退出程序
+
+    def _finish_setup(self) -> None:
+        self.cfg.first_run_done = True
+        self.cfg.save()
+        self.log_line("配置完成，可以开始监控（主页按空格）")
+        self._show("main", force=True)
+
+    def _settings_key(self, k: str, event: events.Key) -> None:
+        if k == "up":
+            event.stop()
+            self._settings_move(-1)
+        elif k == "down":
+            event.stop()
+            self._settings_move(1)
+        elif k in ("left", "right"):
+            _g, f = self.s_rows[self.s_idx]
+            if f["kind"] == "enum":
+                event.stop()
+                self._settings_cycle(f, -1 if k == "left" else 1)
+        elif k in ("enter",):
+            _g, f = self.s_rows[self.s_idx]
+            event.stop()
+            if f["kind"] == "enum":
+                self._settings_cycle(f, 1)
+            else:
+                self._settings_edit(f)
+        elif k == "t":
+            event.stop()
+            self._test_mail_draft()
+        elif k == "ctrl+s":
+            event.stop()
+            self._settings_save()
+        elif k == "escape":
+            event.stop()
+            self._leave_settings(commit=False)
+
+    def _test_mail_draft(self) -> None:
+        # 只使用当前 draft，不落盘
+        to = self.sd.get("to", "").strip()
+        gws_from = self.sd.get("gws_from", "").strip()
+        if not to:
+            self.log_line("✗ 收件邮箱为空，无法测试")
+            return
+        if not notifier.gws_available():
+            self.log_line("✗ gws 未安装，无法发送")
+            return
+        n = self.cfg.notify
+        self.log_line("正在发送测试邮件…（使用当前改动，尚未保存）")
+        ok = notifier.send_email(type(n)(to=to, gws_from=gws_from,
+                                         min_interval_min=n.min_interval_min,
+                                         max_per_hour=n.max_per_hour),
+                                 "【courser】测试邮件",
+                                 "courser 测试邮件：设置里的改动尚未保存，此测试不落盘。",
+                                 log=self.log_line)
+        self.log_line("测试邮件已发送" if ok else "✗ 测试邮件发送失败，请检查 gws")
+
+    # ------------------------------------------------------------------
+    # 动作
+    # ------------------------------------------------------------------
+    def _toggle_monitor(self) -> None:
         w = self.watcher
         if w is None:
             return
         if not self.cfg.first_run_done:
-            self.notify("首次使用请先完成配置（gws + 收件邮箱），已为你打开设置",
-                        severity="warning", timeout=6)
-            self.action_open_settings()
+            self.log_line("首次使用请先完成配置（gws 授权 + 收件邮箱）")
+            self._show("setup")
             return
         if w.running:
             w.stop()
@@ -966,48 +1187,35 @@ class CourserApp(App):
             self.log_line(f"监控开始：每约 {self.cfg.interval_min} 分钟一轮（带抖动）")
 
     @work(thread=True, exclusive=True)
-    def action_run_round(self) -> None:
+    def _run_round(self) -> None:
         w = self.watcher
         if w is None:
             return
         self.log_line("手动触发一轮抓取…")
         w.run_round()
 
-    def action_open_filters(self) -> None:
-        self.push_screen(FilterScreen())
+    def _on_round(self, r: RoundResult) -> None:
+        self.call_from_thread(self._apply_round, r)
 
-    def action_open_settings(self) -> None:
-        self.push_screen(SettingsScreen())
-
-    def action_open_help(self) -> None:
-        self.push_screen(HelpScreen())
-
-    def action_toggle_view(self) -> None:
-        self.view = self.VIEWS[(self.VIEWS.index(self.view) + 1) % len(self.VIEWS)]
-        self.render_table()
-
-    def action_set_interval_dialog(self) -> None:
-        self.push_screen(IntervalModal(self.cfg.interval_min, self._set_interval))
-
-    def _set_interval(self, value: str) -> None:
-        try:
-            self.cfg.interval_min = max(1.0, float(value))
-            self.cfg.save()
-            self.log_line(f"轮询间隔已设为 {self.cfg.interval_min} 分钟（带抖动）")
-        except ValueError:
-            self.log_line("间隔格式错误，未修改")
+    def _apply_round(self, r: RoundResult) -> None:
+        if r.ok and r.courses:
+            self.courses = r.courses
+            self._save_snapshot(r)
+        if self.page == "main":
+            self._render_main(force=True)
+        self._render_runstate()
+        if r.notified:
+            names = "、".join(c.name for c in r.notified)
+            self.log_line(f"[green]已发送提醒邮件：{names}[/]")
 
     def on_unmount(self) -> None:
         if self.watcher:
             self.watcher.stop()
 
 
-# ---------------------------------------------------------------------------
-# 入口
-# ---------------------------------------------------------------------------
-
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="courser", description="PKU 补退选空余名额监控 TUI")
+    ap = argparse.ArgumentParser(prog="courser",
+                                 description="PKU 补退选空余名额监控（纯文本 TUI）")
     ap.add_argument("--once", action="store_true",
                     help="不启动 TUI，直接执行一轮抓取并打印结果（便于 cron/调试）")
     args = ap.parse_args(argv)
@@ -1018,6 +1226,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.once:
         def cli_log(msg: str) -> None:
             print(f"[courser] {msg}", flush=True)
+
         w = Watcher(cfg, log=cli_log)
         r = w.run_round()
         seats = [c for c in r.matched if c.has_seats]
@@ -1028,7 +1237,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"限/选 {c.seats_raw} 空余 {c.avail} 状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
-    # mouse=False：纯键盘操作，终端不上报鼠标事件。
+    # mouse=False：纯键盘菜单界面（无主页输入框、无悬浮窗口）。
     CourserApp(cfg).run(mouse=False)
     return 0
 
