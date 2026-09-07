@@ -191,30 +191,44 @@ async def main() -> int:
         assert f["key"] == "to", f"光标应到收件邮箱，实际 {f['key']}"
         await p.press("enter")
         await p.pause(0.1)
-        se = app.query_one("#sedit_input", Input)
-        assert se.has_focus and app._editing == "settings"
-        se.value = "x@y.com"
-        await p.press("enter")
+        assert app._editing == "settings" and app._editing_key == "to", \
+            "回车应进入该行的行内编辑态"
+        # 原位编辑：保留值、←/→移动光标、退格删除光标前的字符
+        app._edit_text = "ab"
+        app._edit_caret = len("ab")
+        app._render_settings_list()
+        await p.press("left")
+        await p.pause(0.05)
+        assert app._edit_caret == 1, "← 应左移光标"
+        await p.press("backspace")
+        await p.pause(0.05)
+        assert app._edit_text == "b" and app._edit_caret == 0, \
+            "退格应删除光标前字符（原位，不清空重输）"
+        app._edit_text = "x@y.com"
+        app._edit_caret = len("x@y.com")
+        app._render_settings_list()
+        await p.press("enter")      # 回车确认本行编辑
         await p.pause(0.1)
-        assert app.sd["to"] == "x@y.com"
+        assert app._editing is None and app.sd["to"] == "x@y.com", "回车应确认编辑"
         await p.press("ctrl+s")
         await p.pause(0.2)
         assert app.page == "main" and app.cfg.notify.to == "x@y.com", "ctrl+s 应保存并返回"
-        # 设置放弃：改后 Esc 还原
+        # 设置放弃：行内编辑确认后，Esc 离开不保存 → 还原
         await p.press("s")
         await p.pause(0.2)
         for _ in range(2):
             await p.press("down")
         await p.press("enter")
         await p.pause(0.05)
-        se2 = app.query_one("#sedit_input", Input)
-        se2.value = "zz@zz"
+        app._edit_text = "zz@zz"
+        app._edit_caret = len("zz@zz")
+        app._render_settings_list()
         await p.press("enter")
         await p.pause(0.05)
         assert app.sd["to"] == "zz@zz"
         await p.press("escape")
         await p.pause(0.2)
-        assert app.page == "main" and app.cfg.notify.to == "x@y.com", "Esc 应放弃"
+        assert app.page == "main" and app.cfg.notify.to == "x@y.com", "Esc 应放弃不保存"
         await p.press("q")
 
     # ---- q / Ctrl+C：任意页退出 ----
