@@ -98,6 +98,7 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
 uv run courser --once                      # 跑一轮并打印结果（可配 cron）
 uv run python scripts/test_mail.py         # 测试邮件
 uv run python scripts/test_pipeline.py      # 全链路测试（解析→判断→冷却→预算→发送）
+uv run python scripts/test_unit.py          # 单元测试（config/filters/risk/notifier/run_round）
 uv run python scripts/simulate_seats.py    # 模拟"有空余"触发提醒邮件
 uv run python scripts/smoke_tui.py         # TUI 无头冒烟
 ```
@@ -115,7 +116,7 @@ courser/
 │   ├── watcher.py      # 后台监控线程（每轮重新登录）
 │   ├── config.py       # config.json + .env
 │   └── tui.py          # Textual TUI（菜单 / 筛选 / 设置 / 帮助）
-├── scripts/            # test_pipeline / test_mail / simulate_seats / smoke_tui
+├── scripts/            # test_pipeline / test_unit / test_mail / simulate_seats / smoke_tui
 ├── config.example.json
 ├── .env.example
 └── pyproject.toml      # uv 管理（入口 courser.tui:main）
@@ -136,9 +137,15 @@ courser/
 ## 开发
 
 ```bash
-uv run python scripts/smoke_tui.py    # TUI 无头冒烟（不连浏览器）
-uv run courser --once                 # 端到端一轮（需已配置 opencli / gws）
+uv run python scripts/test_pipeline.py    # 全链路测试：解析→判断→冷却→预算→发送（mock gws）
+uv run python scripts/test_unit.py        # 单元测试：config/filters/risk/notifier/run_round
+uv run python scripts/smoke_tui.py        # TUI 无头冒烟：界面打开、快捷键、筛选/设置交互
+uv run courser --once                     # 端到端一轮（需已配置 opencli / gws / 登录凭据）
 ```
+
+> 说明：浏览器侧的真实登录→翻页→抓取（`_EXTRACT_JS`/`login`/`walk_pages`）依赖
+> 真实的北大选课网会话，无法在沙箱里自动化回归，请用 `uv run courser --once` 做最终端到端确认。
+> 其余解析、判断、通知决策、邮件组装与发送（mock gws）均有上述测试覆盖。
 
 ## 参考项目
 

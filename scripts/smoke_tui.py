@@ -34,7 +34,22 @@ async def main() -> int:
             f"expect FirstRunScreen on first launch, got {type(app.screen)}"
         app.pop_screen()  # 关掉向导，进入主界面
         await pilot.pause(0.1)
-        # 帮助
+        # 帮助界面：真实按键 h 打开 + Esc 关闭（回归：之前缺 action_close 导致 Esc 关不掉）
+        await pilot.press("h")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, HelpScreen), f"expect HelpScreen, got {type(app.screen)}"
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, HelpScreen), "Esc 应关闭帮助界面"
+        # 其他模态界面同类回归：打开→Esc 关闭
+        for key, cls in [("f", FilterScreen), ("c", SettingsScreen), ("n", IntervalModal)]:
+            await pilot.press(key)
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, cls), f"expect {cls.__name__}, got {type(app.screen).__name__}"
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, cls), f"Esc 应关闭 {cls.__name__}"
+        # 帮助（调用式，保留原断言）
         app.action_open_help()
         await pilot.pause()
         assert isinstance(app.screen, HelpScreen), f"expect HelpScreen, got {type(app.screen)}"

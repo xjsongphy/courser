@@ -145,18 +145,20 @@ class Watcher:
         return notifiable
 
     # -- 一轮 ------------------------------------------------------------
-    def run_round(self) -> RoundResult:
+    def run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
-            return self._run_round()
+            return self._run_round(fetch_round=fetch_round)
 
-    def _run_round(self) -> RoundResult:
+    def _run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
+        """执行完整一轮。fetch_round 可注入（默认真抓取），便于测试。"""
+        fetch_round = fetch_round or fetch.fetch_round
         r = RoundResult(ts=time.time())
         t0 = time.time()
         creds = {"username": self.cfg.credentials.username,
                  "password": self.cfg.credentials.password}
         self.log(f"开始新一轮抓取（登录方式：{'配置凭据' if creds.get('username') else '自动填充'}）…")
         try:
-            fr = fetch.fetch_round(
+            fr = fetch_round(
                 session=self.cfg.session,
                 creds=creds,
                 window=self.cfg.window,
