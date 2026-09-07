@@ -328,7 +328,7 @@ class CourserApp(App):
                  else ui_value(self.main.search_query or "（未输入）"))
         si.update("\n".join([
             ui_section("查找"),
-            _kv_row("列", label, width=6),
+            _kv_row("列名", label, width=6),
             _kv_row("输入", value, width=6),
         ]))
 
@@ -370,7 +370,7 @@ class CourserApp(App):
                 picked.append((key, label, width))
                 budget -= width + 1
         name_w = min(24, max(1, budget))
-        return pre + [("name", "课程", name_w)] + picked + fixed
+        return pre + [("name", "课程名", name_w)] + picked + fixed
 
     def _table_width(self, cols) -> int:
         return 3 + sum(width for _key, _label, width in cols) + len(cols) - 1
@@ -1207,10 +1207,10 @@ class CourserApp(App):
         return " │ ".join(seg)
 
     def _last_round_tail(self, w) -> tuple[str, str]:
-        """底部「上一轮 / 上次成功」字段：(label, value)。
+        """底部「上一轮 / 最近抓取」字段：(label, value)。
 
         - 本进程跑过一轮 → 上一轮：<时间> · <页数> · <耗时> · <成功/失败>（ts 取该轮）
-        - 只有持久快照 → 上次成功：<时间> · <快照概况>（重启后尚未跑）
+        - 只有持久快照 → 最近抓取：<时间> · <快照概况>（重启后尚未跑），浅色字体
         """
         r = w.last_result if w else None
         if r is not None:
@@ -1232,7 +1232,9 @@ class CourserApp(App):
             parts = [ui_value(t)]
             if self.main.snapshot_meta:
                 parts.append(ui_value(self.main.snapshot_meta))
-            return ("上次成功", " · ".join(parts))
+            # 浅色字体：快照信息属次要内容，用弱化的浅灰呈现
+            value = " · ".join(parts)
+            return ("最近抓取", f"[grey62]{value}[/]")
         return ("上一轮", ui_meta("—"))
 
     def _activity_steady(self, w) -> str:
