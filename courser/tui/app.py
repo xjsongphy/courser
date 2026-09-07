@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import copy
 import time
+from datetime import datetime, timedelta
 from math import ceil
 from typing import Optional
 
@@ -55,6 +56,20 @@ _field_mutate = field_mutate
 
 # 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
 _ACTIVITY_PAGES = {"main", "filters", "logs", "detail"}
+
+
+def _compact_dt(dt: datetime) -> str:
+    """把时间压成随年龄递减的紧凑格式：今天 HH:MM；昨天 "昨天 HH:MM"；
+    更久 "MM-DD HH:MM"；跨年 "YYYY-MM-DD HH:MM"。完整时间戳留给日志页。"""
+    now = datetime.now()
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    if dt.date() == (now - timedelta(days=1)).date():
+        return f"昨天 {dt.strftime('%H:%M')}"
+    if dt.year == now.year:
+        return dt.strftime("%m-%d %H:%M")
+    return dt.strftime("%Y-%m-%d %H:%M")
+
 
 class CourserApp(App):
     """纯文本菜单 TUI：主页面 + 筛选/设置/日志/帮助/详情/首启设置。"""
@@ -126,21 +141,6 @@ class CourserApp(App):
     # ------------------------------------------------------------------
     # 状态文本（数据与排版分离：先取语义数据，再套统一原语）
     # ------------------------------------------------------------------
-    def _last_round_parts(self):
-        """上一轮的语义数据（不含排版）。
-        返回 None 表示还没有任何一轮；否则返回
-        (ok, primary, meta, status, detail)：
-          ok=True  : primary='5 页 / 105 课' meta='196s' status='成功' detail=''
-          ok=False : primary='' meta='' status='失败' detail=<错误纯文本>
-        """
-        r = self.watcher.last_result if self.watcher else None
-        if r is None:
-            return None
-        if r.ok:
-            return (True, f"{r.pages} 页 / {r.total} 课",
-                    f"{r.duration_s:.0f}s", "成功", "")
-        return (False, "", "", "失败", r.error or "")
-
     @staticmethod
     def _error_summary(detail: str) -> str:
         """把异常现场压缩成主页可读的错误类型；原文只在日志页保留。"""
@@ -164,21 +164,6 @@ class CourserApp(App):
         if "失败" in text or "未成功" in text:
             return "本轮抓取失败"
         return "操作失败"
-
-    def _last_round_markup(self, parts=None) -> str:
-        """把 _last_round_parts 的结果套上排版（不含外部 label）。"""
-        if parts is None:
-            parts = self._last_round_parts()
-        if parts is None:
-            return ui_meta("—")
-        ok, primary, meta, status, detail = parts
-        if ok:
-            seg = [ui_value(primary)]
-            if meta:
-                seg.append(ui_meta(meta))
-            seg.append(ui_ok(status))
-            return "  ".join(seg)
-        return ui_error(self._error_summary(detail or status))
 
     def _mail_markup(self) -> str:
         if not notifier.gws_available():
@@ -370,7 +355,7 @@ class CourserApp(App):
 
     def _columns(self, W: int) -> list[tuple[str, str, int]]:
         """选择自适应列宽；文本列超宽时折行，不用省略号。"""
-        pre = [("page", "页", 3), ("no", "课程号", 10)]
+        pre = [("page", "页数", 4), ("no", "课程号", 10)]
         fixed = [("seats", "限选/已选", 8), ("avail", "空余", 6)]
         opt = [("cat", "课程类别", 16), ("dept", "开课单位", 14),
                ("teacher", "教师", 16)]
@@ -487,7 +472,6 @@ class CourserApp(App):
                 yield Static("", id="summary", markup=True)
                 yield Static("", id="coursehead", markup=True)
                 yield Static("", id="searchinput", markup=True)
-                yield Static("", id="snapshot", markup=True)
                 yield Static("", id="courselist", markup=True)
             # 筛选（pi 式：顶部输入即筛 + 列表，↑↓ 选，空格/回车 切换）
             with Vertical(id="page-filters"):
@@ -628,26 +612,19 @@ class CourserApp(App):
              ("[bold cyan]3 只看空余[/]" if self.main.view == "seats" else "[dim]3 只看空余[/]")])
         self.query_one("#coursehead", Static).update(self._labeled("课程", options))
 
-        snapshot = ""
-        if self.main.snapshot_ts:
-            snapshot = ui_section("最近一次") + "\n  " + ui_value(self.main.snapshot_ts)
-            if self.main.snapshot_meta:
-                snapshot += f" · {ui_value(self.main.snapshot_meta)}"
-        self.query_one("#snapshot", Static).update(snapshot)
         summary = "\n".join(self._monitor_summary())
         self.query_one("#summary", Static).update(summary)
 
         rows = self._visible_rows()
-        # 课程窗口为底部可换行的操作提示、状态栏和“最近一次”元信息让出空间。
+        # 课程窗口为底部可换行的操作提示和状态栏让出空间。
         hint_width = max(1, self.size.width - 4)
         hint_plain = _plain_markup(self._main_hint())
         hint_lines = sum(max(1, ceil(cell_len(line) / hint_width))
                          for line in hint_plain.splitlines() or [""])
-        snapshot_extra = 1 if snapshot else 0
         # 查找区固定为标题 + “列” + “输入”三行；底部提示另行渲染，
         # 不再把快捷键挤在查找控件旁边。
         search_extra = 3 if self.main.search_col else 0
-        avail_h = max(1, self.size.height - 17 - snapshot_extra - search_extra
+        avail_h = max(1, self.size.height - 17 - search_extra
                       - max(0, hint_lines - 1))
         self._render_course_window(rows, avail_h)
         self._render_search_line()
@@ -1143,7 +1120,7 @@ class CourserApp(App):
                       _kv_row("周学时", ui_value(str(fields.get("weekly_hours") or "—")), width=12),
                       _kv_row("P / NP", ui_value(str(fields.get("pnp") or "—")), width=12),
                       "", ui_section("抓取信息"),
-                      _kv_row("所属页", ui_value(str(fields.get("page") or "—")), width=12),
+                      _kv_row("所属页数", ui_value(str(fields.get("page") or "—")), width=12),
                       _kv_row("课程 ID", ui_value(str(fields.get("seq") or "—")), width=12),
                       "", ui_meta("★ 表示符合当前筛选"), "", _page_hint()])
         self.query_one("#detbody", Static).update("\n".join(lines))
@@ -1211,6 +1188,35 @@ class CourserApp(App):
         seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
+    def _last_round_tail(self, w) -> tuple[str, str]:
+        """底部「上一轮 / 上次成功」字段：(label, value)。
+
+        - 本进程跑过一轮 → 上一轮：<时间> · <页数> · <耗时> · <成功/失败>（ts 取该轮）
+        - 只有持久快照 → 上次成功：<时间> · <快照概况>（重启后尚未跑）
+        """
+        r = w.last_result if w else None
+        if r is not None:
+            t = (_compact_dt(datetime.fromtimestamp(r.ts))
+                 if getattr(r, "ts", None) else None)
+            head = [ui_value(t)] if t else []
+            if r.ok:
+                parts = head + [ui_value(f"{r.pages} 页 / {r.total} 课"),
+                                ui_meta(f"{r.duration_s:.0f}s"), ui_ok("成功")]
+            else:
+                parts = head + [ui_error(self._error_summary(r.error or "失败"))]
+            return ("上一轮", " · ".join(parts))
+        if getattr(self.main, "snapshot_ts", None):
+            try:
+                t = _compact_dt(datetime.strptime(self.main.snapshot_ts,
+                                                  "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                t = self.main.snapshot_ts
+            parts = [ui_value(t)]
+            if self.main.snapshot_meta:
+                parts.append(ui_value(self.main.snapshot_meta))
+            return ("上次成功", " · ".join(parts))
+        return ("上一轮", ui_meta("—"))
+
     def _activity_steady(self, w) -> str:
         """监控等待 / 空闲（含失败）：
         • 状态 <状态> │ 下一轮 <cd> │ 上一轮 <结果> │ 来源 Google。"""
@@ -1229,13 +1235,8 @@ class CourserApp(App):
         # 空占位（—）用灰色，与 gmail 中性态一致；有实值时用默认前景。
         nxt = ui_meta("—") if cd == "—" else ui_value(cd)
         seg.append(f"{ui_meta('下一轮')} {nxt}")
-        if w and w.last_result:
-            last = (self._last_round_markup()
-                    if w.last_result.ok
-                    else ui_error(w.last_result.error or "失败"))
-        else:
-            last = ui_meta("—")
-        seg.append(f"{ui_meta('上一轮')} {last}")
+        label, last = self._last_round_tail(w)
+        seg.append(f"{ui_meta(label)} {last}")
         seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
