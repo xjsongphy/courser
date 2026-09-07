@@ -712,7 +712,11 @@ class CourserApp(App):
         for i, course_lines in visible:
             c = rows[i]
             lines.extend(course_lines)
-        body.update("\n".join(lines))
+        try:
+            body.update("\n".join(lines))
+        except Exception:
+            # 兜底：绝不让任意课程文本触发 markup 解析错误而崩掉 TUI，降级为纯文本
+            body.update("\n".join(ui_value(_plain_markup(ln)) for ln in lines))
 
     # ------------------------------------------------------------------
     # 渲染：筛选页

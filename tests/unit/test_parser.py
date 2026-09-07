@@ -87,10 +87,33 @@ def test_progress():
     print("✓ Progress：单调步进、total 稳定后作为分母")
 
 
+def test_pager_row_filtered():
+    """表格脚/分页栏不应被解析成课程（其含 JS 文本，渲染会崩）。"""
+    from courser.models import is_real_course  # noqa: PLC0415
+    real = Course(course_no="00433328", name="近代物理实验 (II)")
+    assert is_real_course(real)
+    fake = Course(course_no="Page 1 of 8 First / Previous Next / Last",
+                  name="跳到： function doPagerSubmit(comp) { var form=...")
+    assert not is_real_course(fake)
+    assert not is_real_course(Course(course_no="", name="x"))
+    # parse_page 过滤：含分页栏行的页只留真实课程
+    data = {"pager": {"cur": 1, "total": 1}, "has_next": False, "warning": False,
+            "tables": [{"header": ["课程号", "课程名", "限数/已选"], "rows": [
+                {"cells": ["00433328", "近代物理实验", "12 / 12"], "links": []},
+                {"cells": ["Page 1 of 8 First / Previous Next / Last",
+                            "跳到： function doPagerSubmit(comp) {...}", ""], "links": []},
+            ]}]}
+    courses, _pager, _warned = parser.parse_page(data)
+    assert len(courses) == 1 and courses[0].course_no == "00433328", \
+        f"应只剩真实课程，实得 {[c.course_no for c in courses]}"
+    print("✓ 表脚/分页栏不解析成课程（is_real_course 兜底）")
+
+
 def main() -> int:
     test_parse_14cols()
     test_parse_seats_raw()
     test_progress()
+    test_pager_row_filtered()
     print("=" * 60)
     print("parser 单元测试全部通过 ✅")
     return 0

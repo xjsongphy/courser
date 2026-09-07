@@ -17,6 +17,10 @@ from typing import Optional
 # 同一门课可同时属于多类（如「任选、思政选择性必修」），类别格内用分隔符并列
 _CATEGORY_SPLIT_RE = re.compile(r"[、,，/；;]")
 
+# 表格脚部分页栏文本特征：这些行会被误判成 Course，必须剔除
+_PAGER_MARKERS = ("page", "previous", "next", "跳到", "dopagersubmit",
+                  "first /", "/ last")
+
 
 class FetchError(RuntimeError):
     """抓取流程中的一般错误。"""
@@ -73,6 +77,20 @@ class FetchResult:
     ok: bool = True
     error: str = ""
     warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
+
+
+def is_real_course(c: "Course") -> bool:
+    """剔除被误当课程的表格脚/分页栏：无课程号，或文本带分页栏特征。
+
+    选课网可用列表每页末尾有一行「Page X of Y · First/Previous/Next/Last ·
+    跳到：function doPagerSubmit(...)」的页脚，会被 parse_course 读成一门伪课程，
+    其字符串含 JS 文本，渲染时可能触发 markup 解析崩溃。这里做兜底过滤。
+    """
+    no = (c.course_no or "").strip()
+    if not no:
+        return False
+    text = (f"{no} {c.name or ''}").lower()
+    return not any(m in text for m in _PAGER_MARKERS)
 
 
 @dataclass

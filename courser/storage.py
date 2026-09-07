@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import DATA_DIR
-from .models import Course, RoundResult
+from .models import Course, RoundResult, is_real_course
 
 SNAPSHOT_FILE = DATA_DIR / "last_round.json"
 STATE_FILE = DATA_DIR / "notified.json"
@@ -56,13 +56,14 @@ class SnapshotStore:
         return _read_json(self.path)
 
     def load_courses(self) -> list[Course]:
-        """从快照还原课程列表（供主页/筛选候选）。"""
+        """从快照还原课程列表（供主页/筛选候选），剔除被误存的表格脚/分页栏。"""
         d = self.load()
         if not d:
             return []
         try:
-            return [Course(**{k: v for k, v in c.items()})
-                    for c in d.get("courses", [])]
+            courses = [Course(**{k: v for k, v in c.items()})
+                       for c in d.get("courses", [])]
+            return [c for c in courses if is_real_course(c)]
         except Exception:
             return []
 

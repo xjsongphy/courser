@@ -10,7 +10,7 @@ import re
 import urllib.parse
 from typing import Optional
 
-from ..models import Course
+from ..models import Course, is_real_course
 
 _SEATS_RE = re.compile(r"(\d+)\s*[/／]\s*(\d+)")
 
@@ -119,7 +119,9 @@ def parse_page(data: dict) -> tuple[list[Course], dict, bool]:
     if t is not None:
         header, rows = t.get("header") or [], t.get("rows") or []
         for r in rows:
-            courses.append(_parse_course(header, r.get("cells") or [], r.get("links") or []))
+            c = _parse_course(header, r.get("cells") or [], r.get("links") or [])
+            if is_real_course(c):
+                courses.append(c)
     pager = data.get("pager") or {}
     return (courses,
             {"has_next": bool(data.get("has_next")),
