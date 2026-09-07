@@ -1570,11 +1570,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = Config.load()
 
     if args.once:
+        import sys
+
         def cli_log(msg: str) -> None:
             print(f"[courser] {msg}", flush=True)
 
-        sched = MonitorScheduler(cfg, log=cli_log)
-        r = sched.run_round()
+        def cli_progress(done, total, op):
+            # 与 TUI 相同的抓取进度：单行实时更新到 stderr，不污染 stdout 的结果输出
+            frac = f"{done}/{total}" if total else str(done)
+            sys.stderr.write(f"\r[courser] 抓取 {frac} 步 · {op}" + " " * 4)
+            sys.stderr.flush()
+
+        sched = MonitorScheduler(cfg, log=cli_log, on_progress=cli_progress)
+        try:
+            r = sched.run_round()
+        finally:
+            # 清掉进度行，避免和最终结果混在一起
+            sys.stderr.write("\r" + " " * 90 + "\r")
         seats = [c for c in r.matched if c.has_seats]
         print(f"结果：{'成功' if r.ok else '失败'} | 页数 {r.pages} | 课程 {r.total} | "
               f"命中 {len(r.matched)} | 其中空余 {len(seats)}")

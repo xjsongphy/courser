@@ -173,11 +173,38 @@ def test_budget_and_snapshot():
     print("✓ SnapshotStore：保存/还原课程、候选、元信息")
 
 
+def test_on_progress_callback():
+    """on_progress 应透传给一轮内的 fetch（--once 用它输出进度）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="rrunner-"))
+    calls: list = []
+    cfg = Config()
+    cfg.notify.to = "x@y.z"
+    runner = RoundRunner(cfg, log=lambda m: None,
+                         on_progress=lambda d, t, o: calls.append((d, t, o)),
+                         notify_store=NotificationStateStore(tmp / "n.json"),
+                         budget_store=SendBudgetStore(tmp / "s.json"))
+
+    def stub_fetch(**k):
+        if k.get("on_progress"):
+            k["on_progress"](1, None, "登出旧会话")
+            k["on_progress"](3, 8, "正在读取课程列表 第 2/8 页")
+        fr = FetchResult(pages=1, ok=True)
+        fr.courses = []
+        return fr
+
+    runner.run_round(fetch_round=stub_fetch)
+    assert len(calls) >= 2, f"进度回调应被调用，实际 {calls}"
+    assert calls[0] == (1, None, "登出旧会话")
+    assert calls[1] == (3, 8, "正在读取课程列表 第 2/8 页")
+    print("✓ on_progress 透传给一轮内 fetch（--once 进度来源）")
+
+
 def main() -> int:
     test_full_round_and_cooldown()
     test_warning_and_failure()
     test_retry_and_no_retry_on_warning()
     test_budget_and_snapshot()
+    test_on_progress_callback()
     print("=" * 60)
     print("round runner 集成测试通过 ✅")
     return 0
