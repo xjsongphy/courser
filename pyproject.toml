@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-courser = "courser.tui:main"
+courser = "courser.tui.app:main"
 
 [build-system]
 requires = ["hatchling"]
