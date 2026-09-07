@@ -100,6 +100,22 @@ def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
     return False
 
 
+def _login_error_text(session: str) -> str:
+    """常见的登录错误/提示文案（用于区分「账号被拒」与「提交未触发」）。"""
+    try:
+        v = oc.eval_js(
+            session,
+            r"(() => { const sels = ['#loginError','.login_error','#errormsg',"
+            r"'.error-msg','.tip','.msg']; "
+            r"for (const s of sels) { const el = document.querySelector(s); "
+            r"if (el && el.textContent.trim()) return el.textContent.trim().slice(0,120); } "
+            r"return ''; })()",
+        )
+        return str(v or "").strip()
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # 登录
 # ---------------------------------------------------------------------------
@@ -148,13 +164,20 @@ def _focus_user(session: str) -> bool:
 
 
 def _login_panel_visible(session: str) -> bool:
-    """「账号登录」面板是否可见（隐藏时点登录按钮无效）。"""
+    """登录表单可交互：登录按钮 + 用户名框均可见可点（而非隐藏/0 尺寸）。
+
+    不依赖 #login_panel 的高度（页面加载/切面板瞬间 height 可为 0，造成误判
+    「无法显示面板」），直接看真正要点/要填的控件是否在位可见。
+    """
     try:
         v = oc.eval_js(
             session,
-            r"(() => { const el = document.querySelector('#login_panel'); "
-            r"if (!el) return false; const cs = getComputedStyle(el); "
-            r"return cs.display !== 'none' && el.getBoundingClientRect().height > 0; })()",
+            r"(() => { const visible = el => { if (!el) return false; "
+            r"const cs = getComputedStyle(el); const r = el.getBoundingClientRect(); "
+            r"return cs.display !== 'none' && cs.visibility !== 'hidden' "
+            r"&& r.width > 0 && r.height > 0; }; "
+            r"return visible(document.querySelector('#logon_button')) "
+            r"&& visible(document.querySelector('#user_name')); })()",
         )
         return v is True
     except Exception:
@@ -315,8 +338,10 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
         console = oc.console(session)[-500:]
     except Exception:
         url_now, form_ok, page, console = "?", False, "", ""
+    login_err_text = _login_error_text(session)
+    still_login = ("iaaa.pku.edu.cn" in url_now) or ("oauth.jsp" in url_now)
     detail = "；".join(login_errs) or "未知"
-    # 只有真的检测到 #code_area 才提示验证码，避免凭空气反误导（浏览器可能并无验证码）
+    # 只有真的检测到 #code_area 才提示验证码，避免凭空臆断误导（浏览器可能并无验证码）
     evidence = ""
     try:
         evidence = _login_evidence(session)
@@ -327,11 +352,18 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
     if has_captcha:
         hint = ("页面出现验证码/二次验证（courser 不输入验证码），"
                 "请先在 Chrome 手动登录一次（手动登录后可复用会话来继续）。")
+    elif login_err_text:
+        hint = f"登录页返回错误文案：{login_err_text}（很可能是账号被拒/密码错误）。"
+    elif still_login and form_ok:
+        hint = ("提交后仍停留在登录页且表单仍在——点登录很可能未触发表单提交"
+                "（注意：账号密码虽已写入 DOM，若框架监听 input/change 事件，需要原生键入"
+                "而非 fill 直接改 value 才能被识别）。请在 Chrome 手动登录一次后重试。")
     else:
         hint = ("仍未进入选课页（非验证码问题）。请确认：若自动填充未生效，请在「设置」"
                 "配置学号/密码；若账号密码已正确填入却仍无法进入，请在 Chrome 手动登录一次后重试。")
     raise LoginError(
-        f"登录未成功。尝试记录：{detail}；当前 url={url_now}，登录表单在位={form_ok}；"
+        f"登录未成功。尝试记录：{detail}；当前 url={url_now}，登录表单在位={form_ok}，"
+        f"是否仍停在登录页={still_login}，登录页错误文案={login_err_text or '无'}；"
         f"页面提示：{page}\n浏览器控制台：{console}\n提示：{hint}")
 
 
