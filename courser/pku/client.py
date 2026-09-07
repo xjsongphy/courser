@@ -106,7 +106,7 @@ def _login_error_text(session: str) -> str:
         v = oc.eval_js(
             session,
             r"(() => { const sels = ['#loginError','.login_error','#errormsg',"
-            r"'.error-msg','.tip','.msg']; "
+            r"'.error-msg']; "
             r"for (const s of sels) { const el = document.querySelector(s); "
             r"if (el && el.textContent.trim()) return el.textContent.trim().slice(0,120); } "
             r"return ''; })()",
