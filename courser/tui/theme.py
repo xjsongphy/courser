@@ -118,7 +118,7 @@ Screen { background: transparent; }
 Vertical, VerticalScroll, Static { background: transparent; }
 VerticalScroll:focus { border: none; }
 
-#brand { height: 1; padding: 0 2; }
+#brand { height: 1; padding: 0 4; }
 #stage { height: 1fr; min-height: 0; padding: 0 2; }
 
 /* 主页 */
@@ -157,17 +157,17 @@ FocusScroll {
 #keys {
     height: auto;
     min-height: 1;
-    padding: 0 2 1 2;
+    padding: 0 4 1 4;
     overflow-x: hidden;
     overflow-y: hidden;
 }
 
-/* 底部的全局活动状态行：固定一行；未着色内容用默认前景，次要信息由 dim 承担。 */
+/* 底部的全局活动状态行：固定一行，左对齐到主内容区；
+   未着色用默认前景，状态词按语义染色，次要信息由 dim 承担。 */
 #activity {
     height: 1;
     min-height: 1;
-    padding: 0 2;
-    content-align: center middle;
+    padding: 0 4;
 }
 """
 

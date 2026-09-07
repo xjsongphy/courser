@@ -1189,44 +1189,53 @@ class CourserApp(App):
             pass
 
     def _activity_fetching(self, w) -> str:
-        """抓取过程中底栏只显示动态状态：抓取中 + 步数 + 用时 + 当前操作。"""
-        segs = [ui_value("抓取中")]
+        """抓取过程中：● 状态 抓取中 · 进度 │ 已运行 Xs │ 来源 Google。"""
+        seg = [f"{ui_meta('● 状态')}  {ui_warn('抓取中')}"]
         if self.prog.done is not None:
             if self.prog.total:
-                segs.append(ui_value(f"{self.prog.done} / {self.prog.total} 步"))
+                seg[0] += f" · {ui_value(f'{self.prog.done} / {self.prog.total} 步')}"
             else:
-                segs.append(ui_value(f"{self.prog.done} 步"))
+                seg[0] += f" · {ui_value(f'{self.prog.done} 步')}"
         elapsed = time.time() - w.current_round_started_at
-        segs.append(ui_meta(f"{elapsed:.0f}s"))
-        if self.prog.op:
-            segs.append(ui_meta(str(self.prog.op)))
-        return "   ".join(segs)
+        seg.append(f"{ui_meta('已运行')} {ui_value(f'{elapsed:.0f}s')}")
+        seg.append(f"{ui_meta('来源')} {ui_value('Google')} "
+                   f"{self._google_status_markup()}")
+        return " │ ".join(seg)
+
+    def _activity_steady(self, w) -> str:
+        """监控等待 / 空闲（含失败）：
+        ● 状态 <状态> │ 下一轮 <cd> │ 上一轮 <结果> │ 来源 Google。"""
+        anchor = ui_meta("● 状态")
+        if w and w.running:
+            status = ui_ok("监控中")
+        elif w and w.last_result and not w.last_result.ok:
+            status = ui_error("抓取失败")
+        else:
+            status = ui_meta("未开始")
+        seg = [f"{anchor}  {status}"]
+        cd = "—"
+        if w and w.countdown_s is not None:
+            m, s = divmod(int(w.countdown_s), 60)
+            cd = f"{m} 分 {s:02d} 秒"
+        seg.append(f"{ui_meta('下一轮')} {ui_value(cd)}")
+        if w and w.last_result:
+            last = (self._last_round_markup()
+                    if w.last_result.ok
+                    else ui_error(w.last_result.error or "失败"))
+        else:
+            last = ui_value("—")
+        seg.append(f"{ui_meta('上一轮')} {last}")
+        seg.append(f"{ui_meta('来源')} {ui_value('Google')} "
+                   f"{self._google_status_markup()}")
+        return " │ ".join(seg)
 
     def _render_runstate(self) -> None:
-        """底部唯一的全局 activity 行：抓取中 / 监控等待 / 空闲 —— 互斥，只留一行。"""
+        """底部唯一的全局 activity 行：抓取中 / 监控等待 / 空闲 — 互斥，只留一行。"""
         w = self.watcher
         if w and w.current_round_started_at is not None:
-            # 抓取中：动态状态最重要，下一轮/上一轮/Google 暂时全部让位。
             line = self._activity_fetching(w)
-        elif w and w.running:
-            run = ui_ok("● 监控中")
-            cd = "--"
-            if w.countdown_s is not None:
-                m, s = divmod(w.countdown_s, 60)
-                cd = f"{m} 分 {s:02d} 秒"
-            nxt = f"{ui_label('下一轮')}  {ui_value(cd)}"
-            last = (self._last_round_markup()
-                    if w.last_result else ui_value("—"))
-            prv = f"{ui_label('上一轮')}  {last}"
-            ggg = f"{ui_label('Google')}  {self._google_status_markup()}"
-            line = "   ".join([run, nxt, prv, ggg])
         else:
-            run = ui_value("未开始")
-            last = (self._last_round_markup()
-                    if w and w.last_result else ui_value("—"))
-            prv = f"{ui_label('上一轮')}  {last}"
-            ggg = f"{ui_label('Google')}  {self._google_status_markup()}"
-            line = "   ".join([run, prv, ggg])
+            line = self._activity_steady(w)
         self.query_one("#activity", Static).update(line)
 
     def _render_status_ticker(self) -> None:
