@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from typing import Any, Optional
 
@@ -61,14 +62,42 @@ def _run(session: str, args: list[str], window: Optional[str] = None,
 
 
 def _extract_json(stdout: str) -> Any:
-    """从 stdout 提取 JSON（opencli 可能在 JSON 前后附带零散行）。"""
-    start, end = stdout.find("{"), stdout.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise OpenCliError([], stdout, "stdout 中未找到 JSON 对象", 1)
+    """从 stdout 提取 JSON（对象/数组；opencli 可能在 JSON 前后附带零散行）。"""
+    starts = [i for i in (stdout.find("{"), stdout.find("[")) if i >= 0]
+    if not starts:
+        raise OpenCliError([], stdout, "stdout 中未找到 JSON", 1)
+    start = min(starts)
+    end = max(stdout.rfind("}"), stdout.rfind("]"))
+    if end <= start:
+        raise OpenCliError([], stdout, f"stdout 中未找到 JSON 闭合 (start={start})", 1)
     try:
         return json.loads(stdout[start:end + 1])
     except json.JSONDecodeError as exc:
         raise OpenCliError([], stdout, f"JSON 解析失败: {exc}", 1) from exc
+
+
+_TRUE_FALSE = {"true": True, "false": False, "null": None}
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _parse_eval_output(stdout: str) -> Any:
+    """把 opencli eval 的 stdout 还原为 JS 值。
+
+    关键坑（实测踩过）：JS 布尔/数字经 opencli 回显为裸字符串 "true"/"false"/"42"，
+    若不还原成 Python 的 True/False，`x is True` 类判断永远为 False，
+    会导致"登录页/工作页在位校验"恒假 → 登录永远失败。
+    """
+    stripped = stdout.strip()
+    if stripped in _TRUE_FALSE:
+        return _TRUE_FALSE[stripped]
+    if _NUM_RE.match(stripped):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+    if stripped.startswith("{") or stripped.startswith("["):
+        return _extract_json(stripped)
+    return stripped
 
 
 def open(session: str, url: str, window: Optional[str] = None) -> dict:
@@ -82,12 +111,9 @@ def get_url(session: str) -> str:
 
 
 def eval_js(session: str, js: str) -> Any:
-    """在页面内执行只读 JS，返回解析后的值（IIFE 应返回 JSON）。"""
+    """在页面内执行只读 JS，返回解析后的值（布尔/数字/对象/字符串均正确处理）。"""
     out, _ = _run(session, ["eval", js])
-    stripped = out.strip()
-    if stripped.startswith("{"):
-        return _extract_json(stripped)
-    return stripped
+    return _parse_eval_output(out)
 
 
 def click(session: str, target: str, nth: Optional[int] = None) -> dict:
@@ -95,6 +121,21 @@ def click(session: str, target: str, nth: Optional[int] = None) -> dict:
     if nth is not None:
         args += ["--nth", str(nth)]
     return _extract_json(_run(session, args)[0])
+
+
+def click_by(session: str, *, role: Optional[str] = None, name: Optional[str] = None,
+             nth: Optional[int] = None) -> bool:
+    """按语义（可访问性角色/名称）点击，如翻页 Next 链接。
+    用途：用"点击"而不是直接改 URL 跳页（后者易触发风控提示）。"""
+    args = ["click"]
+    if role:
+        args += ["--role", role]
+    if name:
+        args += ["--name", name]
+    if nth is not None:
+        args += ["--nth", str(nth)]
+    env = _extract_json(_run(session, args)[0])
+    return bool(env.get("clicked"))
 
 
 def fill(session: str, target: str, text: str) -> dict:
@@ -108,3 +149,13 @@ def state(session: str) -> dict:
 
 def wait_selector(session: str, selector: str, timeout_ms: int = 15000) -> dict:
     return _extract_json(_run(session, ["wait", "selector", selector, "--timeout", str(timeout_ms)])[0])
+
+
+def console(session: str) -> str:
+    """读取最近的浏览器控制台消息（用于登录失败诊断）。"""
+    return _run(session, ["console"])[0].strip()
+
+
+def keys(session: str, key: str) -> dict:
+    """向当前聚焦元素发送按键（如 Enter）。"""
+    return _extract_json(_run(session, ["keys", key])[0])

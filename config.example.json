@@ -1,9 +1,9 @@
 {
   "first_run_done": false,
   "interval_min": 8.0,
-  "interval_jitter": 0.4,
-  "page_delay_min": 6.0,
-  "page_delay_max": 14.0,
+  "interval_jitter": 0.3,
+  "page_delay_min": 1.0,
+  "page_delay_max": 2.5,
   "session": "courser-watch",
   "window": "background",
   "force_relogin": true,

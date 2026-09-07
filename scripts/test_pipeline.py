@@ -15,12 +15,20 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# 使用临时配置与临时日志，避免测试污染真实 config.json / data/courser.log
+import tempfile as _tf  # noqa: E402
+
+_tmpenv = Path(_tf.mkdtemp(prefix="courser-tpipe-"))
+os.environ["COURSER_CONFIG"] = str(_tmpenv / "config.json")
+os.environ["COURSER_LOG"] = str(_tmpenv / "courser.log")
 
 import courser.watcher as W  # noqa: E402
 from courser import fetch, notifier  # noqa: E402

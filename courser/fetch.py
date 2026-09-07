@@ -29,7 +29,8 @@ LOGIN_URL = (
 )
 ELECTIVE_BASE = "https://elective.pku.edu.cn"
 LOGOUT_URL = ELECTIVE_BASE + "/elective2008/logout.do"
-IAAA_LOGOUT_URL = "https://iaaa.pku.edu.cn/iaaa/logout.jsp"
+# 注意：iaaa.pku.edu.cn/iaaa/logout.jsp 不存在（返回 404），不要用它；
+# elective 的 logout.do 已足够（会登出并重定向到 IAAA 登录页）。
 
 _SEATS_RE = re.compile(r"(\d+)\s*[/／]\s*(\d+)")
 
@@ -124,7 +125,9 @@ _EXTRACT_JS = r"""
     pager: pm ? { cur: +pm[1], total: +pm[2] } : null,
     has_next: !!next,
     next_href: next ? next.getAttribute('href') : null,
-    warning: /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body),
+    // 仅当页面连课程表都没有时才判定风控/警告（选课页常驻"请勿使用刷课机"
+    // 警示条，不能因为静态文案就误报）
+    warning: tables.length === 0 && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body),
     tables: tables.map(t => ({ nrows: t.rows.length, header: t.header, rows: t.rows }))
   });
 })()
@@ -226,6 +229,34 @@ def _poll_url(session: str, needle: str, timeout_s: float = 30.0,
     return False
 
 
+_TABLE_READY_JS = (
+    r"(() => { const tb = [...document.querySelectorAll('table')]; "
+    r"for (const t of tb) { const cs = [...t.querySelectorAll('th,td')]"
+    r".map(c => (c.textContent || '').trim()); "
+    r"if (cs.some(x => x.includes('课程号')) && cs.some(x => x.includes('限数'))) "
+    r"return true; } return false; })()"
+)
+
+
+def _table_ready(session: str) -> bool:
+    """课程表是否已渲染出来（页面加载未完成时抓取会拿到空数据）。"""
+    try:
+        return oc.eval_js(session, _TABLE_READY_JS) is True
+    except Exception:
+        return False
+
+
+def _wait_table(session: str, timeout_s: float = 20.0,
+                log: Optional[Callable[[str], None]] = None) -> bool:
+    """等到课程表出现；超时返回 False。"""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _table_ready(session):
+            return True
+        sleep_rand(1.0, 2.0)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 登录
 # ---------------------------------------------------------------------------
@@ -252,65 +283,188 @@ def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
     return False
 
 
+def _form_present(session: str) -> bool:
+    """登录表单是否在位（#logon_button 存在）。页面重定向进行中时可能短暂缺失。"""
+    try:
+        return oc.eval_js(session, "(() => !!document.querySelector('#logon_button'))()") is True
+    except Exception:
+        return False
+
+
+def _click_logon(session: str) -> bool:
+    """点击登录按钮；若点击瞬间表单已被重定向走，返回 False（由上层重试），不抛错。"""
+    try:
+        oc.click(session, "input#logon_button")
+        return True
+    except oc.OpenCliError as exc:
+        if "selector_not_found" in (exc.stderr or "") or "matched 0 elements" in (exc.stderr or ""):
+            return False
+        raise
+
+
+def _login_panel_visible(session: str) -> bool:
+    """「账号登录」面板是否可见（隐藏时点登录按钮无效）。"""
+    try:
+        v = oc.eval_js(
+            session,
+            r"(() => { const el = document.querySelector('#login_panel'); "
+            r"if (!el) return false; const cs = getComputedStyle(el); "
+            r"return cs.display !== 'none' && el.getBoundingClientRect().height > 0; })()",
+        )
+        return v is True
+    except Exception:
+        return False
+
+
+def _filled_len(session: str) -> tuple[int, int]:
+    """返回 (用户名长度, 密码长度)；异常时 (-1, -1)。"""
+    try:
+        r = oc.eval_js(
+            session,
+            r"(() => { const u = document.querySelector('#user_name'); "
+            r"const p = document.querySelector('#password'); "
+            r"return [(u && u.value ? u.value.length : 0), (p && p.value ? p.value.length : 0)]; })()",
+        )
+        if isinstance(r, list) and len(r) == 2:
+            return int(r[0]), int(r[1])
+    except Exception:
+        pass
+    return -1, -1
+
+
+def _login_evidence(session: str) -> str:
+    """登录失败现场的 DOM 证据快照（面板/验证码区/表单/URL）。"""
+    try:
+        v = oc.eval_js(
+            session,
+            r"(() => { const code = document.querySelector('#code_area'); "
+            r"const lp = document.querySelector('#login_panel'); "
+            r"return JSON.stringify({code:(code?getComputedStyle(code).display:'-'), "
+            r"panel:(lp?getComputedStyle(lp).display:'-'), "
+            r"form:!!document.querySelector('#logon_button'), url:location.href}); })()",
+        )
+        return str(v)[:220]
+    except Exception:
+        return "?"
+
+
 def login(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
           force_logout: bool = True, log: Optional[Callable[[str], None]] = None) -> str:
     """执行一轮登录。返回登录方式：'login_click'（点了登录）或 'sso_auto'（SSO 直接放行）。
 
-    注意：oauth.jsp 自动跳转 ssoLogin.do 的瞬间，地址栏会短暂出现 elective.pku.edu.cn，
-    但随后可能回弹到登录页。因此必须确认落在「有菜单/补退选」的页面才算成功。
+    竞态说明（实测发现）：oauth.jsp 自动跳 ssoLogin.do 时地址栏会短暂出现
+    elective.pku.edu.cn，随后可能回弹到登录页；且登录表单可能在"填好后、点登录前"
+    被页面重定向走（#logon_button 消失 → selector_not_found）。因此：
+    - 只有确认落在「有菜单/补退选」的工作页才算成功；
+    - 点登录前校验表单在位，不在位就等待/整轮重试；
+    - 整轮最多尝试 2 次；失败时把 页面URL/表单状态/页面提示 带进异常（会写入日志）。
     """
-    if force_logout:
-        # 先登出，确保下一轮真的重新登录
-        for u in (LOGOUT_URL, IAAA_LOGOUT_URL):
+    login_errs: list[str] = []
+    for attempt in (1, 2):
+        if force_logout and attempt == 1:
+            # 先登出，确保这一轮真的重新登录（重试时不重复登出，减少流量）
             try:
-                oc.open(session, u, window=window)
+                oc.open(session, LOGOUT_URL, window=window)
                 sleep_rand(0.8, 1.6)
             except Exception:
                 pass
-    oc.open(session, LOGIN_URL, window=window)
-    sleep_rand(1.5, 3.0)  # 给密码管理器自动填充留时间
+        oc.open(session, LOGIN_URL, window=window)
+        sleep_rand(1.5, 3.5)  # 给密码管理器自动填充留时间
 
-    url = oc.get_url(session)
-    if "elective.pku.edu.cn" in url:
-        # 可能是中转页：等几秒确认没有回弹回登录页
-        sleep_rand(2.0, 3.0)
-        if _on_workable_page(session):
-            return "sso_auto"
-        # 回弹到了登录表单，落到下面正常登录流程
+        url = oc.get_url(session)
+        if "elective.pku.edu.cn" in url:
+            # 可能是中转页：等几秒确认没有回弹回登录页
+            sleep_rand(2.0, 3.0)
+            if _on_workable_page(session):
+                return "sso_auto"
+            # 回弹到了登录表单，落到下面正常登录流程
 
-    # 登录表单：先聚焦用户名框，触发密码管理器的自动填充
-    try:
-        oc.click(session, "#user_name")
-    except Exception:
-        pass
+        # 等登录表单就位（重定向进行中 #logon_button 可能短暂不存在）
+        deadline = time.time() + 12.0
+        while time.time() < deadline and not _form_present(session):
+            sleep_rand(1.5, 2.5)
+        if not _form_present(session):
+            login_errs.append(f"第{attempt}次：登录页未就位（无#logon_button），url={oc.get_url(session)}")
+            continue
 
-    if creds and creds.get("username"):
-        oc.fill(session, "input#user_name", creds["username"])
-        sleep_rand(0.6, 1.2)
-    if creds and creds.get("password"):
-        oc.fill(session, "input#password", creds["password"])
-        sleep_rand(0.6, 1.2)
-    else:
-        sleep_rand(1.8, 3.2)  # 未配置密码：多等一会儿，信任密码管理器自动填充
+        # 确保「账号登录」面板可见：切面板的 JS 可能重渲染表单，
+        # 因此【先切面板、再填值】，避免清空已填内容；隐藏时点登录无效。
+        if not _login_panel_visible(session):
+            for _ in range(2):
+                try:
+                    oc.click(session, "#login_panel_top_bar")
+                    sleep_rand(1.0, 1.8)
+                except Exception:
+                    pass
+                if _login_panel_visible(session):
+                    break
+            if not _login_panel_visible(session):
+                login_errs.append(f"第{attempt}次：无法显示「账号登录」面板（{_login_evidence(session)}）")
 
-    # 最多两击登录；若第一击未成功（自动填充还没落盘等），稍后再试一次
-    for attempt in (1, 2):
-        oc.click(session, "input#logon_button")
-        if _poll_landed(session, timeout_s=22.0 if attempt == 1 else 18.0):
+        # 填凭据
+        if creds and creds.get("username"):
+            oc.fill(session, "input#user_name", creds["username"])
+            sleep_rand(0.6, 1.1)
+        if creds and creds.get("password"):
+            oc.fill(session, "input#password", creds["password"])
+            sleep_rand(0.6, 1.1)
+        else:
+            sleep_rand(1.8, 3.2)  # 未配置密码：多等一会儿，信任自动填充
+
+        if not _form_present(session):
+            login_errs.append(f"第{attempt}次：填写后页面被重定向走（无#logon_button）")
+            continue
+
+        # 校验确实填上了；没填上就再补填一次
+        u_len, p_len = _filled_len(session)
+        if u_len <= 0 or p_len <= 0:
+            login_errs.append(f"第{attempt}次：字段未填上（user={u_len}, pass={p_len}），已补填")
+            try:
+                if creds and creds.get("username"):
+                    oc.fill(session, "input#user_name", creds["username"])
+                if creds and creds.get("password"):
+                    oc.fill(session, "input#password", creds["password"])
+                sleep_rand(1.0, 1.8)
+            except Exception:
+                pass
+            u_len, p_len = _filled_len(session)
+
+        # 提交登录：先聚焦密码框回车（原生表单提交，实测稳定），
+        # 未跳转再点登录按钮兜底
+        try:
+            oc.click(session, "#password")
+            sleep_rand(0.5, 1.0)
+        except Exception:
+            pass
+        try:
+            oc.keys(session, "Enter")
+        except Exception:
+            pass
+        if _poll_landed(session, timeout_s=20.0):
             return "login_click"
+        clicked = _click_logon(session)
+        if _poll_landed(session, timeout_s=20.0):
+            return "login_click"
+        login_errs.append(
+            f"第{attempt}次：提交后未进入选课页（filled=u{u_len}/p{p_len}，"
+            f"现场={_login_evidence(session)}）"
+            + ("，点登录时表单已被重定向走" if not clicked else ""))
         sleep_rand(3.0, 5.0)
 
-    # 仍在 iaaa 域或错误页：拿不到可跳转的登录态，多半是要验证码/二次验证，
-    # 或密码管理器在自动化窗口中没有自动填充（此时请在「设置」里配置学号/密码）
+    # 失败现场收集（会经 watcher 写入 data/courser.log）
     try:
+        url_now = oc.get_url(session)
+        form_ok = _form_present(session)
         page = oc.eval_js(session, "(() => (document.body.innerText || '').slice(0, 300))()")
+        console = oc.console(session)[-500:]
     except Exception:
-        page = ""
+        url_now, form_ok, page, console = "?", False, "", ""
+    detail = "；".join(login_errs) or "未知"
     raise LoginError(
-        f"登录未成功（可能要求验证码/二次验证，或密码管理器未自动填充）。"
-        f"url={oc.get_url(session)} 页面提示：{page}\n"
-        f"提示：若是自动填充未生效，请在 courser「设置」中配置 学号/密码，"
-        f"或先在 Chrome 中手动登录一次。）")
+        f"登录未成功。尝试记录：{detail}；当前 url={url_now}，登录表单在位={form_ok}；"
+        f"页面提示：{page}\n浏览器控制台：{console}\n"
+        f"提示：若页面要求验证码/二次验证（courser 不输入验证码），请先在 Chrome 手动登录一次；"
+        f"若是自动填充未生效，请在「设置」配置学号/密码。")
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +476,8 @@ def goto_supplement(session: str, window: Optional[str] = None,
     url = oc.get_url(session)
     if "SupplyCancel" in url or "supplement" in url:
         return url
-    oc.click(session, 'a[href*="SupplyCancel.do"]')
+    # 帮助页的「选课时间表」里也可能出现"补退选"链接，取第一个（左侧菜单项）
+    oc.click(session, 'a[href*="SupplyCancel.do"]', nth=0)
     if not _poll_url(session, "SupplyCancel", timeout_s=25.0, log=log) and \
        not _poll_url(session, "supplement", timeout_s=10.0, log=log):
         raise FetchError(f"无法进入补退选页面，当前 url={oc.get_url(session)}")
@@ -335,7 +490,7 @@ def goto_supplement(session: str, window: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def walk_pages(session: str, window: Optional[str] = None,
-               pacing: tuple[float, float] = (6.0, 14.0),
+               pacing: tuple[float, float] = (1.0, 2.5),
                max_pages: int = 100,
                log: Optional[Callable[[str], None]] = None) -> tuple[list[Course], dict]:
     courses: list[Course] = []
@@ -344,10 +499,31 @@ def walk_pages(session: str, window: Optional[str] = None,
     meta = {"pages": 0, "finished": False, "warning_hit": False}
 
     while pages < max_pages:
+        # 先等课程表渲染出来再提取（页面未加载完就抓会拿到空数据）
+        first = pages == 0
+        if not _wait_table(session, timeout_s=25.0 if first else 15.0, log=log):
+            ok_wait = False
+            for _ in range(2):  # 重试等待两轮
+                sleep_rand(2.0, 3.5)
+                if _table_ready(session):
+                    ok_wait = True
+                    break
+            if not ok_wait:
+                if log:
+                    log("课程表长时间未出现（页面未加载/被拦截），本轮提前结束")
+                meta["finished"] = True
+                break
+
         data = oc.eval_js(session, _EXTRACT_JS)
         if not isinstance(data, dict):
             raise FetchError("页面提取失败：eval 未返回 JSON")
         page_courses, pager, warned = _parse_page(data)
+        # 有表但解析出 0 门：可能仍在渲染/网络慢，重取一次
+        if not page_courses and data.get("tables"):
+            sleep_rand(1.5, 2.5)
+            data = oc.eval_js(session, _EXTRACT_JS)
+            if isinstance(data, dict):
+                page_courses, pager, warned = _parse_page(data)
         courses.extend(page_courses)
         warning_hit = warning_hit or warned
         pages += 1
@@ -367,10 +543,20 @@ def walk_pages(session: str, window: Optional[str] = None,
             meta["finished"] = True
             break
 
-        # 相邻页面操作之间随机间隔，模仿人类
+        # 用「点击 Next」翻页——绝不直接改 URL 跳页（易触发风控）。
+        # 点击失败：再点一次作为重试；仍失败则本轮到这里为止（少抓几页，
+        # 保持"一切操作都是点击"），由下一轮继续。
         sleep_rand(*pacing)
-        oc.open(session, _absolute(nxt), window=window)
-        sleep_rand(2.0, 4.0)
+        clicked = oc.click_by(session, role="link", name="Next")
+        if not clicked:
+            sleep_rand(1.5, 3.0)
+            clicked = oc.click_by(session, role="link", name="Next")
+        if not clicked:
+            if log:
+                log("翻页点击失败，本轮提前结束（不直接跳 URL）")
+            meta["finished"] = True
+            break
+        sleep_rand(1.0, 2.5)
 
     meta["pages"] = pages
     meta["warning_hit"] = warning_hit
@@ -378,7 +564,7 @@ def walk_pages(session: str, window: Optional[str] = None,
 
 
 def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
-                pacing: tuple[float, float] = (6.0, 14.0),
+                pacing: tuple[float, float] = (1.0, 2.5),
                 force_logout: bool = True,
                 log: Optional[Callable[[str], None]] = None) -> FetchResult:
     """完整一轮：登录 → 补退选 → 翻页抓取。"""

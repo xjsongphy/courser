@@ -11,6 +11,7 @@ interval_min ± jitter 随机抖动 —— 模仿人类、避免风控。
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ class Watcher:
         self._lock = threading.Lock()
         self._round_lock = threading.Lock()
         self.risk = riskmod.BotRisk()
+        self.retry_delay_range = (20.0, 40.0)  # 整轮抓取失败后的重试等待（秒，可覆写）
 
     # -- 状态持久化（课程 seq -> 上次空余 / 上次通知时间） -----------------
     def _load_state(self) -> dict:
@@ -173,6 +175,21 @@ class Watcher:
                 force_logout=self.cfg.force_relogin,
                 log=self.log,
             )
+            # 失败重试机制：整轮失败且非风控提示时，等 20~40 秒重试一次
+            # （人类遇到失败也会再试一次；风控命中则绝不重试硬顶）
+            if not fr.ok and not fr.warning_hit:
+                self.log(f"本轮抓取失败：{fr.error}；等待约 "
+                         f"{self.retry_delay_range[0]:.0f}~{self.retry_delay_range[1]:.0f} "
+                         f"秒后重试一次…")
+                time.sleep(random.uniform(*self.retry_delay_range))
+                fr = fetch_round(
+                    session=self.cfg.session,
+                    creds=creds,
+                    window=self.cfg.window,
+                    pacing=self.cfg.pacing,
+                    force_logout=self.cfg.force_relogin,
+                    log=self.log,
+                )
             r.login_mode = fr.login_mode
             r.pages = fr.pages
             r.total = len(fr.courses)

@@ -22,6 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 使用临时配置与临时日志，避免测试污染真实 config.json / data/courser.log
+_tmpenv = Path(tempfile.mkdtemp(prefix="courser-tunit-"))
+os.environ["COURSER_CONFIG"] = str(_tmpenv / "config.json")
+os.environ["COURSER_LOG"] = str(_tmpenv / "courser.log")
+
 import courser.watcher as W  # noqa: E402
 from courser import fetch, filters, notifier, risk  # noqa: E402
 from courser.config import Config, Filters, Notify  # noqa: E402
@@ -65,6 +70,21 @@ def _tmp_cfg(max_per_hour: int = 5) -> tuple[Config, Path]:
     cfg.filters = Filters(categories=["通识课(通识核心课III)"], depts=["英语语言文学系"],
                           match="any")
     return cfg, tmp
+
+
+# ---------- opencli ----------
+def test_opencli_eval_coercion():
+    """回归：opencli eval 的布尔/数字是裸字符串，必须还原成 Python 类型，
+    否则 _form_present/_on_workable_page 的 `is True` 恒 False → 登录永远失败。"""
+    from courser.opencli import _parse_eval_output  # noqa: PLC0415
+    assert _parse_eval_output("true") is True
+    assert _parse_eval_output("false") is False
+    assert _parse_eval_output("null") is None
+    assert _parse_eval_output("42") == 42
+    assert _parse_eval_output('{"a":1}') == {"a": 1}
+    assert _parse_eval_output('[1,2]') == [1, 2]
+    assert _parse_eval_output("账号登录\n扫码登录") == "账号登录\n扫码登录"
+    print("✓ opencli：eval 输出 布尔/数字/JSON/文本 还原正确（登录在位判断依赖此）")
 
 
 # ---------- config ----------
@@ -184,13 +204,47 @@ def test_run_round_warning_and_fail():
     print("✓ run_round：风控置 100% 分支；登录失败分支不发送")
 
 
+def test_run_round_retry():
+    """失败重试：整轮失败且非风控时，重试一次后成功。"""
+    cfg, tmp = _tmp_cfg()
+    w = W.Watcher(cfg, log=lambda m: None)
+    w.retry_delay_range = (0.1, 0.2)  # 测试用极短等待
+    calls = {"n": 0}
+
+    def flaky(**k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return fetch.FetchResult(login_mode="", pages=0, ok=False, error="网络抖了一下")
+        fr = fetch.FetchResult(login_mode="login_click", pages=1, ok=True)
+        fr.courses = [_mk_course(avail=1)]
+        return fr
+
+    r = w.run_round(fetch_round=flaky)
+    assert r.ok and calls["n"] == 2, f"应失败1次+重试1次，实际调用 {calls['n']} 次"
+    assert len(r.courses) == 1
+    # 风控命中时绝不重试
+    calls["n"] = 0
+    w2 = W.Watcher(_tmp_cfg()[0], log=lambda m: None)
+    w2.retry_delay_range = (0.1, 0.2)
+
+    def warn_then_fail(**k):
+        calls["n"] += 1
+        return fetch.FetchResult(login_mode="", pages=0, ok=False, error="x", warning_hit=True)
+
+    r = w2.run_round(fetch_round=warn_then_fail)
+    assert calls["n"] == 1, "风控命中不应重试"
+    print("✓ run_round：失败自动重试一次；风控命中不重试")
+
+
 def main() -> int:
+    test_opencli_eval_coercion()
     test_config_roundtrip()
     test_filters_desc()
     test_risk()
     test_notifier_branches()
     test_run_round_full()
     test_run_round_warning_and_fail()
+    test_run_round_retry()
     print("=" * 60)
     print("单元测试全部通过 ✅")
     return 0

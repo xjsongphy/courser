@@ -1,8 +1,11 @@
 """courser 的 Textual TUI。
 
-界面刻意保持为终端原生的、类似 Codex 的工作流：一个简短状态行、
-课程结果与运行记录，以及底部命令输入框。所有操作既有快捷键，也可
-通过 composer 输入 ``/start``、``/fetch``、``/filters`` 等命令完成。
+界面刻意保持为终端原生的、类似 codex 的工作流：纯键盘操作（不启用
+鼠标），一个简短状态行、课程结果与运行记录，以及底部命令输入框。
+所有操作既有快捷键，也可通过 composer 输入 ``/start``、``/fetch``、
+``/filters`` 等命令完成。配色遵循 codex 的 styles.md：默认前景色为
+主，标题加粗、次要信息 dim；cyan 用于输入提示/状态，green/red 表示
+成功/错误，magenta 为品牌色。
 """
 
 from __future__ import annotations
@@ -21,8 +24,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (Button, DataTable, Input, Label,
-                             ListItem, ListView, RichLog, Select, Static, Switch)
+from textual.widgets import (DataTable, Input, Label,
+                             ListItem, ListView, RichLog, Static)
 
 from . import notifier
 from .config import Config, load_env_file
@@ -75,6 +78,58 @@ class ComposerInput(Input):
             getattr(self.app, action)()
 
 
+class ToggleRow(Static):
+    """一行"标签: 值"的键盘切换项；←/→（或空格/回车）循环切换。
+
+    替代 Switch / Select 等图形控件，Tab 可在输入框与这些行之间移动
+    焦点，聚焦时行首显示 ❯。
+    """
+
+    can_focus = True
+
+    def __init__(self, label: str, options: list[tuple[str, str]],
+                 value: str, id: Optional[str] = None) -> None:  # noqa: A002
+        super().__init__(id=id, classes="toggle")
+        self.row_label = label
+        self.options = options
+        self.value = value
+
+    def set_value(self, value: str) -> None:
+        self.value = value
+        self._refresh()
+
+    def cycle(self, step: int = 1) -> None:
+        values = [v for _l, v in self.options]
+        if self.value in values:
+            self.set_value(values[(values.index(self.value) + step) % len(values)])
+        else:
+            self.set_value(values[0])
+
+    def _refresh(self) -> None:
+        current = next((l for l, v in self.options if v == self.value), self.value)
+        cursor = "❯" if self.has_focus else " "
+        self.update(f"{cursor} {self.row_label}: {current}   [dim]←/→ 切换[/]")
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def on_focus(self) -> None:
+        self._refresh()
+
+    def on_blur(self) -> None:
+        self._refresh()
+
+    def on_key(self, event) -> None:
+        if event.key in ("right", "space", "enter"):
+            self.cycle(1)
+            event.stop()
+            event.prevent_default()
+        elif event.key == "left":
+            self.cycle(-1)
+            event.stop()
+            event.prevent_default()
+
+
 def _risk_text(percent: int, label: str) -> str:
     """按风险等级渲染"风控触发率"，Static 默认启用 rich markup。"""
     color = {"无": "green", "低": "green", "中": "cyan",
@@ -82,40 +137,45 @@ def _risk_text(percent: int, label: str) -> str:
     return f"风控[bold {color}] {percent}%({label})[/]"
 
 APP_CSS = """
-/* Keep the main surface close to a native terminal, rather than a dashboard. */
-CourserApp { background: $surface; }
-#app_title { height: 1; padding: 0 1; text-style: bold; }
-#context { height: 1; padding: 0 1; color: $text-muted; }
-#status { height: 1; padding: 0 1; color: $text-muted; }
+/* 终端原生观感：默认前景色为主，dim 次要信息，品牌 magenta。 */
+#app_title { height: 1; padding: 0 1; text-style: bold; color: magenta; }
+#context { height: 1; padding: 0 1; text-style: dim; }
+#status { height: 1; padding: 0 1; text-style: dim; }
 #workspace { height: 1fr; padding: 0 1; }
-#welcome { height: auto; margin: 2 0 1 0; color: $text-muted; }
+#welcome { height: auto; margin: 2 0 1 0; }
 #table { height: 1fr; border: none; }
 #log { height: 10; margin-top: 1; border: none; }
 #composer { height: 3; margin: 0 1; }
-#composer_hint { height: 1; padding: 0 1; color: $text-muted; }
-DataTable { background: $surface; }
+#composer_hint { height: 1; padding: 0 1; text-style: dim; }
 DataTable > .datatable--header { text-style: bold; }
 
-/* 弹窗 */
-#filterscreen { width: 94; height: 82%; margin: 1 2; padding: 1 2; }
-#helpbox, #settingsbox { width: 96; height: 86%; padding: 1 2; }
-#intervalbox { width: 60; height: 9; padding: 1 2; align: center middle; }
-#firstrunbox { width: 88; height: 62%; padding: 1 2; }
-#frbtns { height: 4; align: center middle; }
-#frbtns Button { margin: 0 1; }
-#grouprow { height: 3; align: left middle; }
-#grouprow Button { margin: 0 1; }
-#query { margin: 1 0; }
+/* 弹窗：统一宽度、内边距与边框；屏幕层压暗并居中，避免主界面内容透出。 */
+ModalScreen { align: center middle; background: $background 75%; }
+#filterscreen { width: 94; height: 82%; padding: 1 2;
+                background: $surface; border: round $foreground 40%; }
+#helpbox, #settingsbox, #firstrunbox { width: 96; height: 86%; padding: 1 2;
+                background: $surface; border: round $foreground 40%; }
+#intervalbox { width: 64; height: 9; padding: 1 2; align: center middle;
+               background: $surface; border: round $foreground 40%; }
+#helpbox { overflow-y: auto; }
 #fsbody { height: 1fr; }
+#dim_label, #match_label, #fs_hint { text-style: dim; }
+#fs_hint { padding: 0 1; }
 #cands { width: 3fr; }
 #selpanel { width: 2fr; padding: 0 1; }
 #sel_list { height: 1fr; overflow: auto; }
-#fs_hint { height: 3; padding: 0 1; color: $text-muted; }
-#setbtns { height: 4; align: center middle; }
-#setbtns Button { margin: 0 1; }
-Label { margin-top: 1; }
-Input { margin-bottom: 1; }
-.help-title { text-style: bold; color: cyan; }
+#query { margin: 1 0; }
+
+/* 设置页：固定标签列 + 输入列，字段说明不随输入内容消失。 */
+#set_hint { text-style: dim; margin-bottom: 1; }
+#setscroll { height: 1fr; }
+.section { text-style: bold; margin-top: 1; }
+.hint { text-style: dim; }
+.row { height: 3; }
+.field_label { width: 22; height: 3; content-align: left middle; }
+.row Input { width: 1fr; }
+.toggle { height: 1; margin-top: 1; }
+.help-title { text-style: bold; }
 """
 
 
@@ -128,40 +188,44 @@ class HelpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="helpbox"):
-            yield Label("[bold cyan]courser[/] — PKU 补退选空余名额监控", classes="help-title")
+            yield Label("courser — PKU 补退选空余名额监控", classes="help-title")
             yield Static(
-                "■ 命令（底部输入框，和快捷键等价）\n"
+                "命令（底部输入框，和快捷键等价）\n"
                 "  /start  /stop  开始 / 停止监控       /fetch 立即抓取一轮\n"
                 "  /filters 管理筛选条件                /settings 修改全部设置\n"
                 "  /interval [分钟] 修改轮询间隔        /view 切换课程视图\n"
                 "  /help 查看本页                        /quit 退出\n"
                 "  Ctrl+C 任意界面退出（含弹窗/向导）\n\n"
-                "■ 监控流程（每轮重新登录）\n"
+                "监控流程（每轮重新登录）\n"
                 "  登出旧会话 → 打开 IAAA 登录页 → 等待密码管理器自动填充"
                 "（或在「设置」里填学号/密码）→ 点登录 → 补退选 → 动态翻页读取 限数/已选\n\n"
-                "■ 筛选（/filters 或 f）\n"
+                "筛选（/filters 或 f）\n"
                 "  顶部输入框即输即滤（pi 风格）；回车切换选中/自定义添加；\n"
                 "  支持 课程名 / 课程类别 / 开课院系 三个维度，每维度可多选、可并存；\n"
                 "  m 切换「任一命中 / 全部命中」；d 删除条目。\n\n"
-                "■ 通知（/settings → 邮件通知）\n"
+                "通知（/settings → 邮件通知）\n"
                 "  通过 gws（Google Workspace CLI）发送：请先 `gws auth login` 授权，\n"
                 "  并在「设置」填写 收件邮箱（发件账号可选）；同课通知有冷却去重。\n\n"
-                "■ 安全与节奏\n"
-                "  浏览器以后台窗口运行（不抢焦点，可点开 Dock/任务栏窗口实时查看）；\n"
+                "安全与节奏\n"
+                "  浏览器以后台窗口运行（不抢焦点，可打开 Dock/任务栏窗口实时查看）；\n"
                 "  相邻操作随机间隔、轮询间隔带抖动，模仿人类；\n"
                 "  绝不输入验证码，登录失败/风控时自动降速并提示人工处理。\n\n"
-                "■ 快捷键\n"
+                "快捷键\n"
                 "  s 开始/停止监控   r 立即抓取一轮   n 改间隔\n"
-                "  f 筛选   c 设置   v 视图切换   h 帮助   q 退出",
+                "  f 筛选   c 设置   v 视图切换   h 帮助   q 退出\n\n"
+                "[dim]按任意键返回[/]",
                 id="helptext")
-            yield Button("关闭", id="help_close", variant="primary")
-
-    @on(Button.Pressed, "#help_close")
-    def _close(self, event: Button.Pressed) -> None:
-        self.dismiss(None)
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        # 任意键关闭并拦下事件，避免冒泡再次触发应用级绑定
+        # （如按 h 关闭后又被应用重新打开）。Ctrl+C 留给应用级退出。
+        if event.key != "ctrl+c" and self.app.screen is self:
+            event.stop()
+            event.prevent_default()
+            self.dismiss(None)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +234,7 @@ class HelpScreen(ModalScreen[None]):
 
 class FilterScreen(ModalScreen[None]):
     BINDINGS = [
-        Binding("escape", "close", "完成"),
+        Binding("escape", "close", "保存并完成"),
         Binding("1", "group(0)", "课程名"),
         Binding("2", "group(1)", "课程类别"),
         Binding("3", "group(2)", "开课院系"),
@@ -209,31 +273,26 @@ class FilterScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="filterscreen"):
-            yield Label("[bold cyan]筛选管理[/] — 顶部输入即输即滤（pi 风格）",
-                        classes="help-title")
-            with Horizontal(id="grouprow"):
-                for _gid, gname in GROUPS:
-                    yield Button(gname, id=f"grp_{_gid}", classes="groupbtn")
+            yield Label("筛选管理 — 顶部输入即输即滤（pi 风格）", classes="help-title")
+            yield Static(id="dim_label")
             yield Static(id="match_label")
-            yield Input(placeholder="🔍 查询：输入即过滤；回车添加/切换选中（如：通识课(通选课III) / 英语）",
-                        id="query")
+            yield Input(placeholder="查询：输入即过滤；回车添加/切换选中", id="query")
             with Horizontal(id="fsbody"):
                 yield ListView(id="cands")
                 with Vertical(id="selpanel"):
                     yield Label("已选条目（↑↓ 选中后按 d 删除）")
                     yield Static(id="sel_list", classes="panel")
             yield Static(id="fs_hint", classes="hint", markup=True)
-        yield Button("✔ 完成", id="fs_done", variant="success")
 
     def on_mount(self) -> None:
         self._apply_match_label()
-        self._render_group_buttons()
+        self._render_dim_label()
         self._render_list()
         self._render_entries()
         self.query_one("#query", Input).focus()
         self.query_one("#fs_hint", Static).update(
-            "[dim]1/2/3 切换维度  ↑↓ 选择  Enter 切换选中  c 自定义添加  d 删除"
-            "  m 任一/全部  Esc 完成[/]")
+            "[dim]1/2/3 维度  ↑↓ 选择  Enter 切换选中  c 自定义  d 删除"
+            "  m 任一/全部  Esc 完成并保存[/]")
 
     def _group_id(self) -> str:
         return GROUPS[self.group_idx][0]
@@ -248,17 +307,10 @@ class FilterScreen(ModalScreen[None]):
             return list(cands)
         return [c for c in cands if q.lower() in c.lower()]
 
-    def _render_group_buttons(self) -> None:
-        for i, (gid, _gname) in enumerate(GROUPS):
-            b = self.query_one(f"#grp_{gid}", Button)
-            b.variant = "primary" if i == self.group_idx else "default"
-
-    def _apply_match_label(self) -> None:
-        mode = self._app().cfg.filters.match
-        text = ("命中模式：[bold green]任一命中[/]（命中任意一个维度即告警）"
-                if mode == "any" else
-                "命中模式：[bold yellow]全部命中[/]（所有非空维度都命中才告警）")
-        self.query_one("#match_label", Static).update(text)
+    def _render_dim_label(self) -> None:
+        self.query_one("#dim_label", Static).update(
+            "维度：[bold]1[/] 课程名 · [bold]2[/] 课程类别 · [bold]3[/] 开课院系"
+            f"（当前 [bold]{GROUPS[self.group_idx][1]}[/]）")
 
     def _render_list(self) -> None:
         lv = self.query_one("#cands", ListView)
@@ -266,7 +318,7 @@ class FilterScreen(ModalScreen[None]):
         entries = set(self.entries[self._group_id()])
         lv.clear()
         for it in items:
-            mark = "✔ " if it in entries else "  "
+            mark = "✓ " if it in entries else "  "
             lv.append(ListItem(Label(mark + it)))
         if items and (lv.index is None or lv.index >= len(items)):
             lv.index = len(items) - 1 if lv.index is not None else 0
@@ -312,18 +364,6 @@ class FilterScreen(ModalScreen[None]):
         if lv.index is not None and 0 <= lv.index < len(items):
             self._toggle(items[lv.index])
 
-    @on(Button.Pressed, "#fs_done")
-    def _done(self, event: Button.Pressed) -> None:
-        self.action_close()
-
-    @on(Button.Pressed)
-    def _on_group_button(self, event: Button.Pressed) -> None:
-        if event.button.id and event.button.id.startswith("grp_"):
-            gid = event.button.id[4:]
-            self.group_idx = next(i for i, (g, _n) in enumerate(GROUPS) if g == gid)
-            self._render_group_buttons()
-            self._render_list()
-
     def on_key(self, event) -> None:
         q = self.query_one("#query", Input)
         if q.has_focus and event.key in ("down", "up"):
@@ -343,13 +383,20 @@ class FilterScreen(ModalScreen[None]):
     # -- actions ----------------------------------------------------------
     def action_group(self, i: str) -> None:
         self.group_idx = int(i) % len(GROUPS)
-        self._render_group_buttons()
+        self._render_dim_label()
         self._render_list()
 
     def action_toggle_match(self) -> None:
         cfg = self._app().cfg
         cfg.filters.match = "all" if cfg.filters.match != "all" else "any"
         self._apply_match_label()
+
+    def _apply_match_label(self) -> None:
+        mode = self._app().cfg.filters.match
+        text = ("命中模式：[bold green]任一命中[/]（命中任意一个维度即告警）"
+                if mode == "any" else
+                "命中模式：[bold]全部命中[/]（所有非空维度都命中才告警）")
+        self.query_one("#match_label", Static).update(text)
 
     def action_add_custom(self) -> None:
         q = self._query()
@@ -380,7 +427,7 @@ class FilterScreen(ModalScreen[None]):
         cfg.filters.categories = self.entries["categories"]
         cfg.filters.depts = self.entries["depts"]
         cfg.save()
-        self._app().log_line("✔ 筛选条件已保存")
+        self._app().log_line("筛选条件已保存")
         self.dismiss(None)
 
 
@@ -389,51 +436,45 @@ class FilterScreen(ModalScreen[None]):
 # ---------------------------------------------------------------------------
 
 class FirstRunScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "later", "稍后再说")]
+    BINDINGS = [
+        Binding("escape", "later", "稍后再说"),
+        Binding("1", "go_settings", "前往设置"),
+        Binding("2", "done", "已完成配置"),
+    ]
 
     def _app(self) -> "CourserApp":
         return self.app  # type: ignore[return-value]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="firstrunbox"):
-            yield Label("[bold cyan]首次使用 courser[/] — 请先完成两项配置",
-                        classes="help-title")
+            yield Label("首次使用 courser — 请先完成两项配置", classes="help-title")
             yield Static(
-                "开始监控前需要先配置好以下内容（以后仍可在「⚙ 设置」修改）：\n\n"
+                "开始监控前需要先配置好以下内容（以后仍可在「设置」中修改）：\n\n"
                 "1. gws（Google Workspace CLI）——负责发送提醒邮件\n"
                 "   安装并授权：\n"
                 "     brew install gws     （或 npm i -g @googleworkspace/cli）\n"
                 "     gws auth login       （浏览器完成 OAuth2 授权，仅一次）\n\n"
-                "2. 在「⚙ 设置」中填写：\n"
+                "2. 在「设置」中填写：\n"
                 "   · 收件邮箱 —— 提醒邮件发送到的地址\n"
                 "   · gws 发件账号（你的 Gmail，可选）\n"
-                "   建议顺手点「📧 发送测试邮件」验证。\n\n"
+                "   建议顺手用 ctrl+t 发送测试邮件验证。\n\n"
                 "（学号/密码、筛选条件、轮询间隔也都在「设置」中；\n"
-                "   学号/密码留空则依赖浏览器密码管理器自动填充。）",
+                "   学号/密码留空则依赖浏览器密码管理器自动填充。）\n\n"
+                "[dim]1 前往设置   2 我已配置完成   Esc 稍后再说[/]",
                 id="firstruntext")
-            with Horizontal(id="frbtns"):
-                yield Button("⚙ 前往设置", id="fr_settings", variant="primary")
-                yield Button("✓ 我已配置完成", id="fr_done", variant="success")
-                yield Button("稍后再说", id="fr_later", variant="default")
 
-    @on(Button.Pressed, "#fr_settings")
-    def _go_settings(self, event: Button.Pressed) -> None:
+    def action_go_settings(self) -> None:
         self._app().action_open_settings()
 
-    @on(Button.Pressed, "#fr_done")
-    def _done(self, event: Button.Pressed) -> None:
+    def action_done(self) -> None:
         self._app().cfg.first_run_done = True
         self._app().cfg.save()
-        self._app().log_line("✔ 首次配置完成，可以开始监控了")
-        self.dismiss(None)
-
-    @on(Button.Pressed, "#fr_later")
-    def _later(self, event: Button.Pressed) -> None:
-        self._app().log_line("提示：完成配置前无法启动监控（gws + 收件邮箱）")
+        self._app().log_line("首次配置完成，可以开始监控了")
         self.dismiss(None)
 
     def action_later(self) -> None:
-        self._later(None)
+        self._app().log_line("提示：完成配置前无法启动监控（gws + 收件邮箱）")
+        self.dismiss(None)
 
 
 # ---------------------------------------------------------------------------
@@ -441,57 +482,81 @@ class FirstRunScreen(ModalScreen[None]):
 # ---------------------------------------------------------------------------
 
 class SettingsScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "cancel", "取消")]
+    BINDINGS = [
+        Binding("escape", "cancel", "取消"),
+        Binding("ctrl+s", "save", "保存"),
+        Binding("ctrl+t", "test_mail", "测试邮件"),
+        Binding("w", "cycle_window", "窗口模式"),
+        Binding("o", "cycle_match", "筛选组合"),
+        Binding("r", "toggle_relogin", "强制重登"),
+    ]
 
     def _app(self) -> "CourserApp":
         return self.app  # type: ignore[return-value]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settingsbox"):
-            yield Label("[bold cyan]设置[/] — 所有配置集中在此处", classes="help-title")
+            yield Label("设置 — 所有配置集中在此处", classes="help-title")
+            yield Static("tab 切换字段 · w 窗口 · o 组合 · r 强制重登 · "
+                         "ctrl+t 测试邮件 · ctrl+s 保存 · esc 取消", id="set_hint")
             with VerticalScroll(id="setscroll"):
-                yield Label("[bold]账号凭据[/]（可选；留空则依赖浏览器密码管理器自动填充）")
-                yield Input(placeholder="学号 / 用户名", id="set_user")
-                yield Input(placeholder="密码（留空=自动填充）", id="set_pass", password=True)
+                yield Label("账号凭据（可选；留空则依赖浏览器密码管理器自动填充）",
+                            classes="section")
+                with Horizontal(classes="row"):
+                    yield Label("学号", classes="field_label")
+                    yield Input(id="set_user")
+                with Horizontal(classes="row"):
+                    yield Label("密码", classes="field_label")
+                    yield Input(id="set_pass", password=True)
 
-                yield Label("[bold]邮件通知[/]（通过 gws 发送，需先 `gws auth login` 授权）")
-                yield Static(id="set_gws_status")
-                yield Input(placeholder="收件人邮箱（提醒发送到的地址）", id="set_to")
-                yield Input(placeholder="gws 发件账号（Gmail 地址，可选）", id="set_gws_from")
-                yield Input(placeholder="每小时最多发送（封，默认5；只限发信不影响查询）",
-                            id="set_mail_limit")
-                yield Input(placeholder="同课通知冷却（分钟）", id="set_mail_cooldown")
+                yield Label("邮件通知（通过 gws 发送，需先 `gws auth login` 授权）",
+                            classes="section")
+                yield Static(id="set_gws_status", classes="hint")
+                with Horizontal(classes="row"):
+                    yield Label("收件邮箱", classes="field_label")
+                    yield Input(id="set_to")
+                with Horizontal(classes="row"):
+                    yield Label("gws 发件账号", classes="field_label")
+                    yield Input(id="set_gws_from")
+                with Horizontal(classes="row"):
+                    yield Label("每小时最多发送", classes="field_label")
+                    yield Input(id="set_mail_limit")
+                with Horizontal(classes="row"):
+                    yield Label("同课通知冷却（分钟）", classes="field_label")
+                    yield Input(id="set_mail_cooldown")
 
-                yield Label("[bold]轮询节奏[/]（自动带随机抖动）")
-                yield Input(placeholder="轮询间隔（分钟）", id="set_interval")
-                yield Input(placeholder="间隔抖动比例 0~1", id="set_jitter")
-                yield Input(placeholder="翻页随机间隔下限（秒）", id="set_pd_min")
-                yield Input(placeholder="翻页随机间隔上限（秒）", id="set_pd_max")
+                yield Label("轮询节奏（自动带随机抖动）", classes="section")
+                with Horizontal(classes="row"):
+                    yield Label("轮询间隔（分钟）", classes="field_label")
+                    yield Input(id="set_interval")
+                with Horizontal(classes="row"):
+                    yield Label("间隔抖动（0~1）", classes="field_label")
+                    yield Input(id="set_jitter")
+                with Horizontal(classes="row"):
+                    yield Label("翻页间隔下限（秒）", classes="field_label")
+                    yield Input(id="set_pd_min")
+                with Horizontal(classes="row"):
+                    yield Label("翻页间隔上限（秒）", classes="field_label")
+                    yield Input(id="set_pd_max")
 
-                yield Label("[bold]行为[/]")
-                yield Input(placeholder="opencli 会话名", id="set_session")
-                with Horizontal():
-                    yield Select([("后台窗口（不抢焦点）", "background"),
-                                  ("前台窗口", "foreground")], id="set_window",
-                                 prompt="浏览器窗口模式")
-                    yield Select([("任一命中", "any"), ("全部命中", "all")], id="set_match",
-                                 prompt="筛选组合")
-                with Horizontal():
-                    yield Label("每轮强制重新登录（先登出再登录）")
-                    yield Switch(id="set_relogin")
-
-                with Horizontal(id="setbtns"):
-                    yield Button("📧 发送测试邮件", id="set_testmail", variant="warning")
-                    yield Button("💾 保存", id="set_save", variant="success")
-                    yield Button("取消", id="set_cancel", variant="default")
-        yield Button(" ✕ ", id="set_x", variant="error")
+                yield Label("行为", classes="section")
+                with Horizontal(classes="row"):
+                    yield Label("opencli 会话名", classes="field_label")
+                    yield Input(id="set_session")
+                yield ToggleRow("浏览器窗口", [
+                    ("后台窗口（不抢焦点）", "background"),
+                    ("前台窗口", "foreground")], "background", id="tgl_window")
+                yield ToggleRow("筛选组合", [
+                    ("任一命中", "any"), ("全部命中", "all")], "any", id="tgl_match")
+                yield ToggleRow("每轮强制重新登录", [
+                    ("关", "off"), ("开", "on")], "off", id="tgl_relogin")
 
     def on_mount(self) -> None:
         cfg = self._app().cfg
         c, n = cfg.credentials, cfg.notify
         self.query_one("#set_user", Input).value = c.username
         self.query_one("#set_pass", Input).value = c.password
-        gws_ok = "✓ 已安装" if notifier.gws_available() else "✗ 未找到 gws 命令"
+        gws_ok = "已安装" if notifier.gws_available() else "未找到 gws 命令"
         self.query_one("#set_gws_status", Static).update(
             f"gws 状态：{gws_ok}（安装后执行 gws auth login 授权）")
         self.query_one("#set_to", Input).value = n.to
@@ -503,9 +568,10 @@ class SettingsScreen(ModalScreen[None]):
         self.query_one("#set_pd_min", Input).value = str(cfg.page_delay_min)
         self.query_one("#set_pd_max", Input).value = str(cfg.page_delay_max)
         self.query_one("#set_session", Input).value = cfg.session
-        self.query_one("#set_window", Select).value = cfg.window
-        self.query_one("#set_match", Select).value = cfg.filters.match
-        self.query_one("#set_relogin", Switch).value = cfg.force_relogin
+        self.query_one("#tgl_window", ToggleRow).set_value(cfg.window)
+        self.query_one("#tgl_match", ToggleRow).set_value(cfg.filters.match)
+        self.query_one("#tgl_relogin", ToggleRow).set_value(
+            "on" if cfg.force_relogin else "off")
 
     def _float(self, iid: str, default: float) -> float:
         try:
@@ -527,26 +593,22 @@ class SettingsScreen(ModalScreen[None]):
         cfg.page_delay_min = self._float("#set_pd_min", 6.0)
         cfg.page_delay_max = self._float("#set_pd_max", 14.0)
         cfg.session = self.query_one("#set_session", Input).value.strip() or "courser-watch"
-        cfg.window = self.query_one("#set_window", Select).value
-        cfg.filters.match = self.query_one("#set_match", Select).value
-        cfg.force_relogin = self.query_one("#set_relogin", Switch).value
+        cfg.window = self.query_one("#tgl_window", ToggleRow).value
+        cfg.filters.match = self.query_one("#tgl_match", ToggleRow).value
+        cfg.force_relogin = self.query_one("#tgl_relogin", ToggleRow).value == "on"
         cfg.first_run_done = True
         cfg.save()
 
-    @on(Button.Pressed, "#set_save")
-    def _save(self, event: Button.Pressed) -> None:
+    def action_save(self) -> None:
         self._apply()
-        self._app().log_line("✔ 设置已保存，首次配置完成")
+        self._app().log_line("设置已保存，首次配置完成")
         self.dismiss(None)
         self._app()._maybe_close_first_run()
 
-    @on(Button.Pressed, "#set_cancel")
-    @on(Button.Pressed, "#set_x")
-    def _cancel(self, event: Button.Pressed) -> None:
+    def action_cancel(self) -> None:
         self.dismiss(None)
 
-    @on(Button.Pressed, "#set_testmail")
-    def _test_mail(self, event: Button.Pressed) -> None:
+    def action_test_mail(self) -> None:
         self._apply()
         cfg = self._app().cfg
         self._app().log_line("正在发送测试邮件…")
@@ -554,10 +616,19 @@ class SettingsScreen(ModalScreen[None]):
                                  "这是 courser 发送的测试邮件。收到说明邮件通知配置正常。",
                                  log=self._app().log_line)
         if ok:
-            self._app().notify("测试邮件已发送 ✓", timeout=5)
+            self._app().notify("测试邮件已发送", timeout=5)
 
-    def action_cancel(self) -> None:
-        self.dismiss(None)
+    def _toggle_row(self, iid: str) -> ToggleRow:
+        return self.query_one(iid, ToggleRow)
+
+    def action_cycle_window(self) -> None:
+        self._toggle_row("#tgl_window").cycle()
+
+    def action_cycle_match(self) -> None:
+        self._toggle_row("#tgl_match").cycle()
+
+    def action_toggle_relogin(self) -> None:
+        self._toggle_row("#tgl_relogin").cycle()
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +647,7 @@ class IntervalModal(ModalScreen[None]):
         with Vertical(id="intervalbox"):
             yield Label(f"修改轮询间隔（分钟，当前 {self.current}）")
             yield Input(placeholder="新间隔（分钟）", id="interval_input")
+            yield Static("[dim]回车确认 · esc 取消[/]", classes="hint")
 
     def on_mount(self) -> None:
         self.query_one("#interval_input", Input).focus()
@@ -854,12 +926,13 @@ class CourserApp(App):
         if w is None:
             return
         st = self.query_one("#status", Static)
-        run_state = "▶ 监控中" if w.running else "⏸ 未开始"
+        run_state = "监控中" if w.running else "未开始"
         countdown = f"{w.countdown_s}s" if w.countdown_s is not None else "--"
         last = ""
         if w.last_result:
             last = (f"{w.last_result.pages}页/{w.last_result.total}课 "
-                    f"{w.last_result.duration_s:.0f}s" + (" ✔" if w.last_result.ok else " ✗"))
+                    f"{w.last_result.duration_s:.0f}s"
+                    + (" 成功" if w.last_result.ok else " 失败"))
         risk = "风控 --" if not w.last_result else _risk_text(w.last_result.risk_percent,
                                                              w.last_result.risk_label)
         fs = FilterSet(self.cfg.filters)
@@ -882,10 +955,10 @@ class CourserApp(App):
             return
         if w.running:
             w.stop()
-            self.log_line("⏸ 监控已停止")
+            self.log_line("监控已停止")
         else:
             w.start()
-            self.log_line(f"▶ 监控开始：每约 {self.cfg.interval_min} 分钟一轮（带抖动）")
+            self.log_line(f"监控开始：每约 {self.cfg.interval_min} 分钟一轮（带抖动）")
 
     @work(thread=True, exclusive=True)
     def action_run_round(self) -> None:
@@ -950,7 +1023,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"限/选 {c.seats_raw} 空余 {c.avail} 状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
-    CourserApp(cfg).run()
+    # mouse=False：纯键盘操作，终端不上报鼠标事件。
+    CourserApp(cfg).run(mouse=False)
     return 0
 
 

@@ -21,7 +21,15 @@ os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
 
 from courser.config import Config  # noqa: E402
 from courser.tui import (CourserApp, FilterScreen, FirstRunScreen,  # noqa: E402
-                         HelpScreen, IntervalModal, SettingsScreen)
+                         HelpScreen, IntervalModal, SettingsScreen, ToggleRow)
+
+
+def _assert_no_gui_widgets(screen) -> None:
+    """弹窗内不允许出现任何图形控件（按钮/开关/下拉）。"""
+    from textual.widgets import Button, Select, Switch
+    for wtype in (Button, Select, Switch):
+        assert not screen.query(wtype), \
+            f"{type(screen).__name__} 中不应出现 {wtype.__name__}"
 
 
 async def main() -> int:
@@ -32,7 +40,12 @@ async def main() -> int:
         await pilot.pause(0.2)
         assert isinstance(app.screen, FirstRunScreen), \
             f"expect FirstRunScreen on first launch, got {type(app.screen)}"
-        app.pop_screen()  # 关掉向导，进入主界面
+        _assert_no_gui_widgets(app.screen)
+        # 首次向导纯键盘：按 2 = 我已配置完成 → 关闭向导
+        await pilot.press("2")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, FirstRunScreen), "按 2 应完成首次配置并关闭向导"
+        assert app.cfg.first_run_done, "按 2 应写入 first_run_done"
         await pilot.pause(0.1)
         # 帮助界面：真实按键 h 打开 + Esc 关闭（回归：之前缺 action_close 导致 Esc 关不掉）
         await pilot.press("h")
@@ -41,11 +54,12 @@ async def main() -> int:
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert not isinstance(app.screen, HelpScreen), "Esc 应关闭帮助界面"
-        # 其他模态界面同类回归：打开→Esc 关闭
+        # 其他模态界面同类回归：打开→Esc 关闭；且不含图形控件
         for key, cls in [("f", FilterScreen), ("c", SettingsScreen), ("n", IntervalModal)]:
             await pilot.press(key)
             await pilot.pause(0.2)
             assert isinstance(app.screen, cls), f"expect {cls.__name__}, got {type(app.screen).__name__}"
+            _assert_no_gui_widgets(app.screen)
             await pilot.press("escape")
             await pilot.pause(0.2)
             assert not isinstance(app.screen, cls), f"Esc 应关闭 {cls.__name__}"
@@ -71,7 +85,7 @@ async def main() -> int:
         fs.action_close()
         await pilot.pause()
 
-        # 设置（唯一入口）
+        # 设置（唯一入口）：标签列 + 键盘切换行 + ctrl+s 保存
         app.action_open_settings()
         await pilot.pause()
         s = app.screen
@@ -79,8 +93,18 @@ async def main() -> int:
         s.query_one("#set_interval").value = "10"
         s._apply()
         assert app.cfg.interval_min == 10.0
-        app.pop_screen()
-        await pilot.pause()
+        # ToggleRow：循环切换 窗口模式/筛选组合/强制重登
+        tgl = s.query_one("#tgl_relogin", ToggleRow)
+        before = tgl.value
+        tgl.cycle()
+        assert tgl.value != before, f"cycle 应改变值：{before} -> {tgl.value}"
+        s.query_one("#tgl_match", ToggleRow).cycle()
+        # ctrl+s 保存并关闭（不依赖鼠标）
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, SettingsScreen), "ctrl+s 应保存并关闭设置"
+        assert app.cfg.interval_min == 10.0
+        await pilot.pause(0.1)
 
         # 视图切换 + 间隔弹窗
         app.action_toggle_view()
