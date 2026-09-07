@@ -17,6 +17,7 @@ import html
 import json
 import shutil
 import subprocess
+import time
 from email.message import EmailMessage
 from typing import Callable, Optional
 
@@ -25,6 +26,11 @@ from .config import Notify
 _GWS = "gws"
 _AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
               "然后在 courser「设置」中填写 收件邮箱（gws 发件账号可选）。")
+
+# 最近一次发信结果（用于 TUI 展示 Google/邮件连通性）
+#   None = 尚未尝试发信；True = 最近一次成功；False = 最近一次失败。
+_last_mail_result: Optional[bool] = None
+_last_mail_at: float = 0.0
 
 
 def gws_available() -> bool:
@@ -167,3 +173,39 @@ def build_subject(courses: list) -> str:
     if len(courses) > 3:
         names += f" 等{len(courses)}门"
     return f"【选课提醒】补退选有空余名额：{names}"
+
+
+# ---------------------------------------------------------------------------
+# 发信结果状态（TUI 展示 Google/邮件连通性用）
+# ---------------------------------------------------------------------------
+
+def last_mail_status() -> tuple[Optional[bool], float]:
+    """最近一次发信结果：返回 (None=未发过 / True=成功 / False=失败, 时间戳)。"""
+    return _last_mail_result, _last_mail_at
+
+
+def _record_mail_result(ok: bool) -> None:
+    global _last_mail_result, _last_mail_at
+    _last_mail_result = ok
+    _last_mail_at = time.time()
+
+
+def send_email_with_retry(notify: Notify, subject: str, body: str,
+                          body_html: Optional[str] = None,
+                          log: Optional[Callable[[str], None]] = None,
+                          attempts: int = 3, delay_s: float = 5.0) -> bool:
+    """发信失败自动重试：默认最多 3 次、间隔 5s（硬编码，不进设置）。
+
+    每次尝试都更新最近发信结果状态（供 TUI 连通性展示）；任一次成功即返回 True，
+    全部失败返回 False。
+    """
+    for attempt in range(1, attempts + 1):
+        if send_email(notify, subject, body, body_html=body_html, log=log):
+            _record_mail_result(True)
+            return True
+        _record_mail_result(False)
+        if attempt < attempts:
+            if log:
+                log(f"邮件发送失败（第 {attempt}/{attempts} 次），重试前等待 {delay_s:.0f} 秒…")
+            time.sleep(delay_s)
+    return False
