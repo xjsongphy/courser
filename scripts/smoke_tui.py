@@ -108,17 +108,41 @@ async def main() -> int:
         assert app._table_layout == "wide", app._table_layout
         assert len(app.query_one("#table").columns) == 8
 
-    # Ctrl+C 是应用级高优先级退出：在弹窗中也必须生效。
-    quit_cfg = Config.load()
-    quit_cfg.first_run_done = True
-    quit_app = CourserApp(quit_cfg)
-    async with quit_app.run_test() as pilot:
-        quit_app.action_open_help()
-        await pilot.pause()
-        assert isinstance(quit_app.screen, HelpScreen)
-        await pilot.press("ctrl+c")
-        await pilot.pause()
-        assert quit_app._exit and not quit_app.is_running
+    # Ctrl+C 是应用级高优先级退出：主界面与任意弹窗都必须生效。
+    async def _quit_case(open_screen, expect=None):
+        qc = Config.load()
+        qc.first_run_done = True
+        qa = CourserApp(qc)
+        async with qa.run_test() as p:
+            await p.pause(0.2)
+            await open_screen(p)
+            await p.pause(0.2)
+            if expect is not None:
+                assert isinstance(qa.screen, expect), \
+                    f"期望 {expect.__name__}，实际 {type(qa.screen).__name__}"
+            await p.press("ctrl+c")
+            await p.pause(0.2)
+            assert qa._exit and not qa.is_running, \
+                f"ctrl+c 未退出：界面={type(qa.screen).__name__}"
+
+    # 主界面
+    async def _noop(p):  # noqa: ANN001
+        return None
+    await _quit_case(_noop)
+    # 帮助 / 筛选 / 设置 / 间隔 四个弹窗（真实按键打开后 Ctrl+C）
+    for key, cls in [("h", HelpScreen), ("f", FilterScreen),
+                     ("c", SettingsScreen), ("n", IntervalModal)]:
+        await _quit_case(lambda p, k=key: p.press(k), expect=cls)
+    # 首次向导（first_run_done=False 时自动弹出）
+    qc2 = Config.load()
+    qc2.first_run_done = False
+    qa2 = CourserApp(qc2)
+    async with qa2.run_test() as p2:
+        await p2.pause(0.3)
+        assert isinstance(qa2.screen, FirstRunScreen), type(qa2.screen).__name__
+        await p2.press("ctrl+c")
+        await p2.pause(0.2)
+        assert qa2._exit and not qa2.is_running
 
     print("TUI smoke OK: help/filter/settings/view/interval/table/resize/ctrl+c 均正常")
     return 0
