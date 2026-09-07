@@ -55,9 +55,10 @@ class FilterViewState:
 
 @dataclass
 class SettingsViewState:
-    """设置页：行索引（draft 事务）。"""
+    """设置页：行索引（draft 事务）+ 测试邮件二次确认窗口。"""
 
     index: int = 0
+    test_mail_armed_at: Optional[float] = None  # 确认窗口起点；None = 未在确认
 
 
 @dataclass

@@ -97,6 +97,7 @@ SETTINGS_FIELDS: list[tuple[str, list[dict]]] = [
         {"key": "gws_from", "label": "gws 发件账号", "kind": "text"},
         {"key": "max_per_hour", "label": "每小时最多发送", "kind": "int"},
         {"key": "min_interval_min", "label": "同课通知冷却（分）", "kind": "float"},
+        {"key": "test_mail", "label": "发送一封测试邮件", "kind": "action"},
     ]),
     ("轮询节奏（自动带随机抖动）", [
         {"key": "interval_min", "label": "轮询间隔（分）", "kind": "float"},
@@ -168,6 +169,7 @@ FocusScroll {
     height: 1;
     min-height: 1;
     padding: 0 4;
+    margin: 0 0 1 0;   /* 状态栏不贴底：与上方提示行的留白（#keys padding-bottom 1）对称 */
 }
 """
 

@@ -905,7 +905,7 @@ class CourserApp(App):
             "轮询节奏（自动带随机抖动）": ("轮询", "自动带随机抖动"),
             "行为": ("浏览器", "会话与窗口行为"),
         }
-        out = [f"{ui_label('gws')} {gws}  {ui_meta('t 测试邮件 · Ctrl+S 保存')}\n"]
+        out = [f"{ui_label('gws')} {gws}\n"]
         last = None
         for i, (gname, f) in enumerate(self.s_rows):
             if gname != last:
@@ -922,6 +922,17 @@ class CourserApp(App):
                 out.append(_kv_row(f["label"], self.editor.markup(),
                                    width=16, prefix=f"{cur} "))
                 continue
+            if f["kind"] == "action":
+                # 动作行：发送一封测试邮件（回车进入二次确认）
+                if self.sv.test_mail_armed_at is not None:
+                    value = ui_warn("确认中…请再次回车发送")
+                elif notifier.gws_available():
+                    value = ui_meta("回车发送 · 再次回车确认")
+                else:
+                    value = ui_warn("gws 未安装，无法发送")
+                out.append(_kv_row(f["label"], value, width=18,
+                                   prefix=f"{cur} "))
+                continue
             val = self._draft_display(f)
             if val == "（空）":
                 value = ui_meta(val)
@@ -931,8 +942,12 @@ class CourserApp(App):
                 value = ui_value(val)
             out.append(_kv_row(f["label"], value, width=16,
                                prefix=f"{cur} "))
-        out.extend(["", _page_hint(
-            "↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃")])
+        if self.sv.test_mail_armed_at is not None:
+            # 二次确认窗口：底栏只提示这一项
+            out.extend(["", _page_hint("再次 Enter 确认发送")])
+        else:
+            out.extend(["", _page_hint(
+                "↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃")])
         self.query_one("#settings_list", Static).update("\n".join(out))
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
@@ -1017,6 +1032,8 @@ class CourserApp(App):
             return
         try:
             for _g, f in self.s_rows:
+                if f["kind"] == "action":
+                    continue   # 动作行（发送测试邮件）不是可保存字段
                 _field_mutate(self.cfg, f["key"], self.sd.get(f["key"], ""))
             self.cfg.save()
         except ValueError:
@@ -1027,6 +1044,7 @@ class CourserApp(App):
 
     def _leave_settings(self, commit: bool) -> None:
         self._clear_editing()
+        self.sv.test_mail_armed_at = None   # 离开设置页 = 放弃/结束确认窗口
         if not commit:
             self.log_line("已放弃设置修改")
         self._show("main", force=True)
@@ -1082,7 +1100,7 @@ class CourserApp(App):
                  _shortcut_row("↑ / ↓", "选择字段"),
                  _shortcut_row("← / →", "切换选项或移动光标"),
                  _shortcut_row("Enter", "编辑"),
-                 _shortcut_row("t", "发送测试邮件"),
+                 _shortcut_row("Enter ×2", "发送测试邮件（2 秒内确认）"),
                  _shortcut_row("Ctrl+S", "保存"),
                  _shortcut_row("Esc", "放弃修改"), "",
                  ui_section("监控流程"),
@@ -1491,19 +1509,39 @@ class CourserApp(App):
         elif k in ("enter",):
             _g, f = self.s_rows[self.sv.index]
             event.stop()
-            if f["kind"] == "enum":
+            if f["kind"] == "action":
+                self._test_mail_enter()
+            elif f["kind"] == "enum":
                 self._settings_cycle(f, 1)
             else:
                 self._settings_edit(f)
-        elif k == "t":
-            event.stop()
-            self._test_mail_draft()
         elif k == "ctrl+s":
             event.stop()
             self._settings_save()
         elif k == "escape":
             event.stop()
             self._leave_settings(commit=False)
+
+    def _test_mail_enter(self) -> None:
+        """发送测试邮件：首次回车进入二次确认（底栏只提示
+        「再次 Enter 确认发送」），2 秒内再按一次才真正发送；超时自动取消。"""
+        if self.sv.test_mail_armed_at is not None:
+            # 确认窗口内的第二次回车 → 真正发送
+            self.sv.test_mail_armed_at = None
+            self._test_mail_draft()
+            self._render_settings_list()
+            return
+        self.sv.test_mail_armed_at = time.time()
+        self.set_timer(2.0, self._expire_test_mail_confirm)
+        self._render_settings_list()
+
+    def _expire_test_mail_confirm(self) -> None:
+        """2 秒内没有再按回车：取消发送，恢复原操作提示。"""
+        if self.sv.test_mail_armed_at is not None:
+            self.sv.test_mail_armed_at = None
+            self.log_line("测试邮件未发送（超时取消）")
+            if self.page == "settings":
+                self._render_settings_list()
 
     def _test_mail_draft(self) -> None:
         # 只使用当前 draft，不落盘
