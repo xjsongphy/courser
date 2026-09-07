@@ -14,7 +14,9 @@
 - ↑↓ = 移动，Space = 开始/停止或选中/取消（各页内遵循）；
 - 主页键：Space 开始/停止 · r 立即抓取 · f 筛选 · s 设置 · l 日志 ·
   1/2/3 视图（全部/符合筛选/只看空余）· h 帮助 · q 退出。
-主页无输入框；仅筛选搜索、设置字段编辑、首启向导的填写需要底部单行输入。
+所有文字输入（设置字段、首启收件邮箱等）都复用同一套行内编辑器
+（见 courser/editing.py）：值保留在原行、回车进入、←/→ 移动光标、回车确认、
+Esc 取消；没有独立输入框。筛选页的搜索则直接输入即过滤。
 """
 
 from __future__ import annotations
@@ -31,14 +33,15 @@ from typing import Optional
 
 from rich.cells import cell_len
 from rich.markup import escape
-from textual import events, on, work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Input, Static
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import Static
 
 from . import notifier
 from .config import Config, load_env_file
+from .editing import FieldEditor
 from .filters import FilterSet
 from .fetch import Course
 from .watcher import RoundResult, Watcher
@@ -84,10 +87,8 @@ SETTINGS_FIELDS: list[tuple[str, list[dict]]] = [
 
 CSS = """
 Screen { background: transparent; }
-Vertical, VerticalScroll, Horizontal, Static, Input { background: transparent; }
+Vertical, VerticalScroll, Static { background: transparent; }
 VerticalScroll:focus { border: none; }
-Input { border: none; padding: 0; }
-Input:focus { border: none; }
 
 .panel { border: solid #5c5c5c; padding: 0 1; }
 
@@ -107,9 +108,6 @@ Input:focus { border: none; }
 
 #logscroll, #helpscroll, #detscroll { height: 1fr; }
 #filters_list, #settings_list, #setupbody { height: auto; }
-#setupeditrow { height: 1; margin-top: 1; display: none; }
-#setupeditrow Static { color: cyan; }
-#setupeditrow Input { width: 1fr; }
 
 #keys, #runstate { height: 1; padding: 0 1; }
 """
@@ -246,12 +244,10 @@ class CourserApp(App):
         self.sd: dict[str, str] = {}
         self.s_rows: list[tuple[str, dict]] = []
         self.s_idx = 0
-        # 单行输入编辑态（settings 行内编辑用，非独立输入框）
+        # 编辑态：settings / setup 共用一个可复用的行内编辑器
         self._editing: Optional[str] = None   # None / settings / setup
         self._editing_key: Optional[str] = None
-        self._editing_label = ""
-        self._edit_text = ""    # 行内编辑缓冲
-        self._edit_caret = 0    # 光标位置（字符数）
+        self.editor = FieldEditor()
         self._init_rows()
         self._load_snapshot()
 
@@ -504,12 +500,9 @@ class CourserApp(App):
             with Vertical(id="page-detail"):
                 with FocusScroll(id="detscroll"):
                     yield Static("", id="detbody", markup=True)
-            # 首次设置
+            # 首次设置（行内编辑邮箱，复用 FieldEditor）
             with Vertical(id="page-setup"):
                 yield Static("", id="setupbody", markup=True)
-                with Horizontal(id="setupeditrow"):
-                    yield Static("", id="setupedit_label", classes="inlabel")
-                    yield Input(id="setup_input")
         yield Static("", id="keys")
         yield Static("", id="runstate")
 
@@ -608,12 +601,10 @@ class CourserApp(App):
     # 渲染：主页
     # ------------------------------------------------------------------
     def _clear_editing(self) -> None:
+        self.editor.reset()
         self._editing = None
         self._editing_key = None
-        self._edit_text = ""
-        self._edit_caret = 0
-        self.query_one("#setupeditrow", Horizontal).display = False
-        # 焦点还给惰性锚，避免停在隐藏输入行上吞键
+        # 焦点还给惰性锚，避免停在输入态吞键
         self._anchor_focus()
 
     def _render_main(self, force: bool = False) -> None:
@@ -872,7 +863,7 @@ class CourserApp(App):
             cur = "[cyan]❯[/]" if i == self.s_idx else " "
             if i == self.s_idx and self._editing == "settings" and \
                     self._editing_key == f["key"]:
-                out.append(f"{cur} {escape(f['label'])}：{self._editing_value(f)}")
+                out.append(f"{cur} {escape(f['label'])}：{self.editor.markup()}")
             else:
                 val = self._draft_display(f)
                 if i == self.s_idx:
@@ -881,86 +872,57 @@ class CourserApp(App):
                     out.append(f"{cur} {escape(f['label'])}：[dim]{val}[/]")
         self.query_one("#settings_list", Static).update("\n".join(out))
 
-    def _editing_value(self, f: dict) -> str:
-        """行内编辑的光标文本（光标位置处显示块状 ▌，支持键盘移动光标）。"""
-        raw = self._edit_text
-        if f["kind"] == "password":
-            show = "•" * len(raw)
+    # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）------
+    _EDIT_HINT = ("[cyan]←/→[/] 移动光标 · [cyan]退格/Delete[/] 删除 · "
+                  "[cyan]Home/End[/] 行首/行尾 · [cyan]回车[/] 确认 · "
+                  "[cyan]Esc[/] 取消")
+
+    def _begin_field(self, context: str, key: str, kind: str, value: str) -> None:
+        """进入任意字段的行内编辑（值保留在该行，光标置于末尾）。"""
+        self.editor.begin(value, kind)
+        self._editing = context
+        self._editing_key = key
+        self._render_field_page()
+        self.query_one("#keys", Static).update(self._EDIT_HINT)
+
+    def _render_field_page(self) -> None:
+        if self.page == "settings":
+            self._render_settings_list()
+        elif self.page == "setup":
+            self._render_setup()
+
+    def _edit_key(self, event: events.Key) -> None:
+        """编辑态按键统一走 FieldEditor；commit/cancel 才由调用方落盘。"""
+        out = self.editor.feed(event.key,
+                               getattr(event, "char", None),
+                               bool(getattr(event, "is_printable", False)))
+        event.stop()
+        if out == "commit":
+            val, context, key = self.editor.text, self._editing, self._editing_key
+            self._clear_editing()
+            if context == "settings" and key:
+                self.sd[key] = val
+            elif context == "setup":
+                self.cfg.notify.to = val
+                self.log_line("收件邮箱已更新")
+            self._render_field_page()
+            self.query_one("#keys", Static).update(self.HINTS[self.page])
+        elif out == "cancel":
+            self._clear_editing()
+            self._render_field_page()
+            self.query_one("#keys", Static).update(self.HINTS[self.page])
         else:
-            show = raw
-        caret = min(max(0, self._edit_caret), len(show))
-        return ("[cyan]" + escape(show[:caret]) + "▌" +
-                escape(show[caret:]) + "[/]")
+            self._render_field_page()   # 移动光标 / 删除 / 插入后刷新
+
+    def _settings_edit(self, f: dict) -> None:
+        # 进入该字段的行内编辑（复用 FieldEditor）
+        self._begin_field("settings", f["key"], f["kind"],
+                          self.sd.get(f["key"], ""))
 
     def _settings_move(self, step: int) -> None:
         n = len(self.s_rows)
         self.s_idx = min(max(0, self.s_idx + step), n - 1)
         self._render_settings_list()
-
-    def _settings_edit(self, f: dict) -> None:
-        # 行内编辑：值保留在该行，回车进入编辑；可用 ←/→ 移动光标继续修改
-        self._editing = "settings"
-        self._editing_key = f["key"]
-        self._editing_label = f["label"]
-        self._edit_text = self.sd.get(f["key"], "")
-        self._edit_caret = len(self._edit_text)
-        self._render_settings_list()
-        self.query_one("#keys", Static).update(
-            "[cyan]←/→[/] 移动光标 · [cyan]退格/Delete[/] 删除 · "
-            "[cyan]Home/End[/] 行首/行尾 · [cyan]回车[/] 确认 · "
-            "[cyan]Esc[/] 取消")
-
-    def _settings_edit_key(self, event: events.Key) -> None:
-        """设置行内编辑的键盘处理（只改 _edit_text，回车才写入 sd）。"""
-        k = event.key
-        event.stop()
-        n = len(self._edit_text)
-        if k == "escape":
-            # 取消编辑：不改 sd（原值仍在），直接返回浏览
-            self._finish_settings_edit(cancel=True)
-        elif k == "enter":
-            self.sd[self._editing_key] = self._edit_text
-            self._finish_settings_edit(cancel=False)
-        elif k == "left":
-            self._edit_caret = max(0, self._edit_caret - 1)
-            self._render_settings_list()
-        elif k == "right":
-            self._edit_caret = min(n, self._edit_caret + 1)
-            self._render_settings_list()
-        elif k == "home":
-            self._edit_caret = 0
-            self._render_settings_list()
-        elif k == "end":
-            self._edit_caret = n
-            self._render_settings_list()
-        elif k == "backspace":
-            if self._edit_caret > 0:
-                self._edit_text = (self._edit_text[:self._edit_caret - 1] +
-                                   self._edit_text[self._edit_caret:])
-                self._edit_caret -= 1
-                self._render_settings_list()
-        elif k == "delete":
-            if self._edit_caret < n:
-                self._edit_text = (self._edit_text[:self._edit_caret] +
-                                   self._edit_text[self._edit_caret + 1:])
-                self._render_settings_list()
-        else:
-            # 可打印字符 → 在光标处插入（支持中文；Textual 字母 char 常为空）
-            char = getattr(event, "char", None)
-            key = getattr(event, "key", "")
-            text = char if char else (key if len(key) == 1 else None)
-            if text and getattr(event, "is_printable", False):
-                self._edit_text = (self._edit_text[:self._edit_caret] + text +
-                                   self._edit_text[self._edit_caret:])
-                self._edit_caret += len(text)
-                self._render_settings_list()
-
-    def _finish_settings_edit(self, cancel: bool) -> None:
-        if cancel:
-            self.log_line("已取消编辑")
-        self._clear_editing()
-        self._render_settings_list()
-        self.query_one("#keys", Static).update(self.HINTS["settings"])
 
     def _settings_cycle(self, f: dict, step: int) -> None:
         opts = f["opts"]
@@ -1073,10 +1035,14 @@ class CourserApp(App):
             lines.append("  [yellow]⚠[/] gws 尚未授权——请先在命令行执行 gws auth login")
         lines.append("")
         lines.append("[bold]收件邮箱[/]（用于接收提醒，必填）")
-        if has_recip:
-            lines.append("  [green]✓[/] " + escape(self.cfg.notify.to))
+        if self._editing == "setup" and self._editing_key == "to":
+            lines.append("  ❯ 收件邮箱：" + self.editor.markup())
         else:
-            lines.append("  [yellow]未填写[/]")
+            if has_recip:
+                lines.append("  ❯ 收件邮箱：" + escape(self.cfg.notify.to))
+            else:
+                lines.append("  ❯ 收件邮箱：[yellow]未填写[/]")
+            lines.append("  [dim]（按 ↓ 或 回车 编辑收件邮箱）[/]")
         lines.append("")
         lines.append("学号 / 密码可留空：登录时由浏览器密码管理器自动填充。")
         lines.append("也可稍后在主页按 s，在「设置 → 账号凭据」中补充。")
@@ -1088,26 +1054,10 @@ class CourserApp(App):
         body.update("\n".join(lines))
 
     # ------------------------------------------------------------------
-    # 首启设置：把“填邮箱”做成可编辑行，取代“按 2 我完成”
+    # 首启设置：收件邮箱同样用 FieldEditor 行内编辑（与设置页同一套代码）
     # ------------------------------------------------------------------
     def _setup_edit_email(self) -> None:
-        self._editing = "setup"
-        self._editing_key = "to"
-        lab = self.query_one("#setupedit_label", Static)
-        inp = self.query_one("#setup_input", Input)
-        lab.update("✎ 收件邮箱：")
-        inp.password = False
-        inp.value = self.cfg.notify.to
-        self.query_one("#setupeditrow", Horizontal).display = True
-        inp.focus()
-
-    @on(Input.Submitted, "#setup_input")
-    def _on_setup_submit(self, event: Input.Submitted) -> None:
-        self.cfg.notify.to = event.value.strip()
-        self._clear_editing()
-        self._render_setup()
-        if self.cfg.notify.to:
-            self.log_line("收件邮箱已填写，回车开始使用")
+        self._begin_field("setup", "to", "text", self.cfg.notify.to)
 
     # ------------------------------------------------------------------
     # 运行状态行（屏幕底部）
@@ -1174,13 +1124,8 @@ class CourserApp(App):
     # ------------------------------------------------------------------
     def on_key(self, event: events.Key) -> None:
         if self._editing:
-            if self._editing == "settings":
-                self._settings_edit_key(event)
-            elif event.key == "escape":
-                # 放弃首启输入的当前编辑（不退出页面）
-                self._clear_editing()
-                self._render_setup()
-                event.stop()
+            # 任何行内编辑（settings / setup）统一走 FieldEditor
+            self._edit_key(event)
             return
         k = event.key
         page = self.page
@@ -1358,7 +1303,7 @@ class CourserApp(App):
     def _setup_key(self, k: str, event: events.Key) -> None:
         if k == "down":
             event.stop()
-            self._setup_edit_email() if not self.cfg.notify.to else None
+            self._setup_edit_email()   # ↓ = 编辑收件邮箱（行内）
             return
         if k in ("enter", " "):
             event.stop()

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 _tmpdir = tempfile.mkdtemp(prefix="courser-smoke-")
 os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
 
-from textual.widgets import Button, Input, Select, Switch  # noqa: E402
+from textual.widgets import Button, Select, Switch  # noqa: E402
 
 from courser.config import Config  # noqa: E402
 from courser.fetch import Course  # noqa: E402
@@ -62,12 +62,13 @@ async def main() -> int:
         assert app.page == "setup", f"首次启动应在设置向导页，实际 {app.page}"
         _assert_no_gui_widgets(app)
         # 未配置时按 1 不会开监控（此路径不可达，因为主页未进入）；跳过
-        # 用 ↓ 选中并编辑收件邮箱
+        # ↓ 进入收件邮箱的行内编辑（复用 FieldEditor）
         await p.press("down")
         await p.pause(0.1)
-        si = app.query_one("#setup_input", Input)
-        assert si.has_focus and app._editing == "setup", "首启应出现底部单行输入"
-        si.value = "me@example.com"
+        assert app._editing == "setup" and app.editor.active, \
+            "↓ 应进入收件邮箱行内编辑"
+        app.editor.begin("me@example.com", "text")   # 原值保留、光标在末尾
+        app._render_setup()
         await p.press("enter")
         await p.pause(0.1)
         assert app.cfg.notify.to == "me@example.com", "收件邮箱应写入"
@@ -191,21 +192,19 @@ async def main() -> int:
         assert f["key"] == "to", f"光标应到收件邮箱，实际 {f['key']}"
         await p.press("enter")
         await p.pause(0.1)
-        assert app._editing == "settings" and app._editing_key == "to", \
-            "回车应进入该行的行内编辑态"
+        assert app._editing == "settings" and app._editing_key == "to" \
+            and app.editor.active, "回车应进入该行的行内编辑态"
         # 原位编辑：保留值、←/→移动光标、退格删除光标前的字符
-        app._edit_text = "ab"
-        app._edit_caret = len("ab")
+        app.editor.begin("ab")
         app._render_settings_list()
         await p.press("left")
         await p.pause(0.05)
-        assert app._edit_caret == 1, "← 应左移光标"
+        assert app.editor.caret == 1, "← 应左移光标"
         await p.press("backspace")
         await p.pause(0.05)
-        assert app._edit_text == "b" and app._edit_caret == 0, \
+        assert app.editor.text == "b" and app.editor.caret == 0, \
             "退格应删除光标前字符（原位，不清空重输）"
-        app._edit_text = "x@y.com"
-        app._edit_caret = len("x@y.com")
+        app.editor.begin("x@y.com")
         app._render_settings_list()
         await p.press("enter")      # 回车确认本行编辑
         await p.pause(0.1)
@@ -220,8 +219,7 @@ async def main() -> int:
             await p.press("down")
         await p.press("enter")
         await p.pause(0.05)
-        app._edit_text = "zz@zz"
-        app._edit_caret = len("zz@zz")
+        app.editor.begin("zz@zz")
         app._render_settings_list()
         await p.press("enter")
         await p.pause(0.05)
