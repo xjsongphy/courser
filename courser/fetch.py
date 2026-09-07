@@ -329,14 +329,38 @@ def _form_present(session: str) -> bool:
 
 
 def _click_logon(session: str) -> bool:
-    """点击登录按钮；若点击瞬间表单已被重定向走，返回 False（由上层重试），不抛错。"""
+    """点击登录按钮，并确认真的点到了（clicked=true 且匹配到按钮）。
+
+    若点击瞬间表单被重定向走/未匹配到 → 返回 False（由上层重试），不抛错。
+    """
     try:
-        oc.click(session, "input#logon_button")
-        return True
+        env = oc.click(session, "input#logon_button")
+        return bool(env.get("clicked")) and int(env.get("matches_n") or 1) >= 1
     except oc.OpenCliError as exc:
         if "selector_not_found" in (exc.stderr or "") or "matched 0 elements" in (exc.stderr or ""):
             return False
         raise
+
+
+def _focus_user(session: str) -> bool:
+    """点击用户名框并确认焦点真正落在其上（触发密码管理器填充的前提）。"""
+    for _ in range(2):
+        try:
+            oc.click(session, "#user_name")
+        except Exception:
+            pass
+        sleep_rand(0.5, 1.0)
+        try:
+            focused = oc.eval_js(
+                session,
+                "(() => !!(document.activeElement && "
+                "document.activeElement.id === 'user_name'))()",
+            )
+            if focused is True:
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _login_panel_visible(session: str) -> bool:
@@ -438,6 +462,10 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
             if not _login_panel_visible(session):
                 login_errs.append(f"第{attempt}次：无法显示「账号登录」面板（{_login_evidence(session)}）")
 
+        # 聚焦用户名框并确认焦点（触发密码管理器填充）；失败不阻塞，继续填值
+        if not _focus_user(session):
+            login_errs.append(f"第{attempt}次：用户名框焦点未确认")
+
         # 填凭据
         if creds and creds.get("username"):
             oc.fill(session, "input#user_name", creds["username"])
@@ -526,27 +554,42 @@ def goto_supplement(session: str, window: Optional[str] = None,
     if "SupplyCancel" in url or "supplement" in url:
         return url
     # 点左侧菜单（#menu）里的「补退选」入口，避免点到选课时间表里的同名链接
-    try:
-        oc.click(session, '#menu a[href*="SupplyCancel.do"]')
-    except Exception:
-        oc.click(session, 'a[href*="SupplyCancel.do"]', nth=0)
-    # 可能在当前页跳转，也可能新开标签页：两者都轮询处理
-    deadline = time.time() + 25.0
-    while time.time() < deadline:
-        sleep_rand(0.8, 1.5)
-        cur = oc.get_url(session)
-        if "SupplyCancel" in cur or "supplement" in cur:
-            sleep_rand(1.0, 2.0)
-            return cur
-        page = _find_supplement_tab(session)
-        if page:
+    for attempt in (1, 2):
+        try:
+            env = oc.click(session, '#menu a[href*="SupplyCancel.do"]')
+            clicked = bool(env.get("clicked")) and int(env.get("matches_n") or 1) >= 1
+        except Exception:
+            clicked = False
+        if not clicked:
             try:
-                oc.tab_select(session, page)
-                sleep_rand(1.0, 2.0)
-                return oc.get_url(session)
+                env = oc.click(session, 'a[href*="SupplyCancel.do"]', nth=0)
+                clicked = bool(env.get("clicked")) and int(env.get("matches_n") or 1) >= 1
             except Exception:
-                pass
-    raise FetchError(f"无法进入补退选页面，当前 url={oc.get_url(session)}")
+                clicked = False
+        if not clicked:
+            sleep_rand(2.0, 3.5)
+            continue
+        if log:
+            log(f"已点击「补退选」（第 {attempt} 次）")
+        # 确认页面发生预期变化：当前页或新标签进入补退选页；否则重试点击
+        deadline = time.time() + (16.0 if attempt == 1 else 20.0)
+        while time.time() < deadline:
+            sleep_rand(0.8, 1.5)
+            cur = oc.get_url(session)
+            if "SupplyCancel" in cur or "supplement" in cur:
+                sleep_rand(1.0, 2.0)
+                return cur
+            page = _find_supplement_tab(session)
+            if page:
+                try:
+                    oc.tab_select(session, page)
+                    sleep_rand(1.0, 2.0)
+                    return oc.get_url(session)
+                except Exception:
+                    pass
+        if attempt == 1:
+            sleep_rand(1.5, 3.0)
+    raise FetchError(f"点击「补退选」后页面未变化，当前 url={oc.get_url(session)}")
 
 
 # ---------------------------------------------------------------------------

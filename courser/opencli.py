@@ -126,7 +126,8 @@ def click(session: str, target: str, nth: Optional[int] = None) -> dict:
 def click_by(session: str, *, role: Optional[str] = None, name: Optional[str] = None,
              nth: Optional[int] = None) -> bool:
     """按语义（可访问性角色/名称）点击，如翻页 Next 链接。
-    用途：用"点击"而不是直接改 URL 跳页（后者易触发风控提示）。"""
+    用途：用"点击"而不是直接改 URL 跳页（后者易触发风控提示）。
+    必须确认真的点到了（clicked=true 且 matches_n>=1），否则返回 False 由上层重试。"""
     args = ["click"]
     if role:
         args += ["--role", role]
@@ -134,8 +135,15 @@ def click_by(session: str, *, role: Optional[str] = None, name: Optional[str] = 
         args += ["--name", name]
     if nth is not None:
         args += ["--nth", str(nth)]
-    env = _extract_json(_run(session, args)[0])
-    return bool(env.get("clicked"))
+    try:
+        env = _extract_json(_run(session, args)[0])
+    except OpenCliError as exc:
+        if ("selector_not_found" in (exc.stderr or "")
+                or "not_found" in (exc.stderr or "")
+                or "matched 0 elements" in (exc.stderr or "")):
+            return False
+        raise
+    return bool(env.get("clicked")) and int(env.get("matches_n") or 1) >= 1
 
 
 def fill(session: str, target: str, text: str) -> dict:
