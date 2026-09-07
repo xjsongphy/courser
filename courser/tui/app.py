@@ -1197,8 +1197,8 @@ class CourserApp(App):
             pass
 
     def _activity_fetching(self, w) -> str:
-        """抓取过程中：● 状态 抓取中 · 进度 │ 已运行 Xs │ 来源 Google。"""
-        seg = [f"{ui_meta('● 状态')}  {ui_warn('抓取中')}"]
+        """抓取过程中：• 状态 抓取中 · 进度 │ 已运行 Xs │ 来源 Google。"""
+        seg = [f"{ui_meta('• 状态')}  {ui_warn('抓取中')}"]
         if self.prog.done is not None:
             if self.prog.total:
                 seg[0] += f" · {ui_value(f'{self.prog.done} / {self.prog.total} 步')}"
@@ -1211,8 +1211,8 @@ class CourserApp(App):
 
     def _activity_steady(self, w) -> str:
         """监控等待 / 空闲（含失败）：
-        ● 状态 <状态> │ 下一轮 <cd> │ 上一轮 <结果> │ 来源 Google。"""
-        anchor = ui_meta("● 状态")
+        • 状态 <状态> │ 下一轮 <cd> │ 上一轮 <结果> │ 来源 Google。"""
+        anchor = ui_meta("• 状态")
         if w and w.running:
             status = ui_ok("监控中")
         elif w and w.last_result and not w.last_result.ok:
