@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from courser import notifier  # noqa: E402
 from courser.config import Config, load_env_file  # noqa: E402
-from courser.fetch import Course  # noqa: E402
+from courser.models import Course  # noqa: E402
 from courser.filters import FilterSet  # noqa: E402
 
 

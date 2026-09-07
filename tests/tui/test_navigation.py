@@ -1,11 +1,8 @@
-"""TUI 无头冒烟测试：驱动重构后的纯文本监控 TUI。
+"""TUI 导航回归测试（无头）。
 
-覆盖：首启设置（填邮箱→就绪→进入主页）→ 主页视图 1/2/3 → 课程光标与详情 →
-筛选（Tab 维度 / 空格切换 / 回车保存 / Esc 放弃）→ 设置（draft 保存/放弃）→
-日志 / 帮助返回 → 任意页 q / Ctrl+C 退出。
-
-用法：
-    uv run python scripts/smoke_tui.py
+覆盖：首启设置 → 主页视图 1/2/3 → 课程光标与详情 → 筛选 → 设置 →
+日志/帮助返回 → 任意页 q / Ctrl+C 退出。
+用法：uv run python tests/tui/test_navigation.py
 （不启动监控、不连浏览器）
 """
 
@@ -17,17 +14,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# 使用临时配置，避免冒烟测试污染真实 config.json
-_tmpdir = tempfile.mkdtemp(prefix="courser-smoke-")
+_tmpdir = tempfile.mkdtemp(prefix="courser-tnav-")
 os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
 
 from textual.widgets import Button, Select, Switch  # noqa: E402
 
 from courser.config import Config  # noqa: E402
-from courser.fetch import Course  # noqa: E402
-from courser.tui import CourserApp  # noqa: E402
+from courser.models import Course  # noqa: E402
+from courser.tui.app import CourserApp  # noqa: E402
 
 
 def _assert_no_gui_widgets(app) -> None:
@@ -48,8 +44,8 @@ def _fake(app) -> None:
     app.candidate_lists = {"names": ["英语写作", "普通物理"],
                            "categories": ["英语类", "物理类"],
                            "depts": ["英语系", "物理学院"]}
-    app.snapshot_ts = "2026-09-07 12:00:00"
-    app.snapshot_meta = "2 页 · 2 门课程"
+    app.main.snapshot_ts = "2026-09-07 12:00:00"
+    app.main.snapshot_meta = "2 页 · 2 门课程"
 
 
 async def main() -> int:
@@ -61,18 +57,16 @@ async def main() -> int:
         await p.pause(0.3)
         assert app.page == "setup", f"首次启动应在设置向导页，实际 {app.page}"
         _assert_no_gui_widgets(app)
-        # 未配置时按 1 不会开监控（此路径不可达，因为主页未进入）；跳过
-        # ↓ 进入收件邮箱的行内编辑（复用 FieldEditor）
         await p.press("down")
         await p.pause(0.1)
-        assert app._editing == "setup" and app.editor.active, \
+        assert app.editing.context == "setup" and app.editor.active, \
             "↓ 应进入收件邮箱行内编辑"
-        app.editor.begin("me@example.com", "text")   # 原值保留、光标在末尾
+        app.editor.begin("me@example.com", "text")
         app._render_setup()
         await p.press("enter")
         await p.pause(0.1)
         assert app.cfg.notify.to == "me@example.com", "收件邮箱应写入"
-        await p.press("enter")  # 就绪后回车开始使用
+        await p.press("enter")
         await p.pause(0.2)
         assert app.page == "main", f"就绪回车应进入主页，实际 {app.page}"
         assert app.cfg.first_run_done, "完成首启应置 first_run_done"
@@ -89,20 +83,18 @@ async def main() -> int:
         assert app.page == "main"
         _fake(app)
         app._render_main(force=True)
-        # 视图 3（只看空余）→ 只剩空余课程；视图 1 全部
         await p.press("3")
         await p.pause(0.1)
-        assert app.view == "seats" and len(app._visible_rows()) == 1, "视图3应只剩空余"
+        assert app.main.view == "seats" and len(app._visible_rows()) == 1, "视图3应只剩空余"
         await p.press("2")
         await p.pause(0.1)
-        assert app.view == "matched" and len(app._visible_rows()) == 1, "视图2应只看符合筛选"
+        assert app.main.view == "matched" and len(app._visible_rows()) == 1, "视图2应只看符合筛选"
         await p.press("1")
         await p.pause(0.1)
-        assert app.view == "all" and len(app._visible_rows()) == 2
-        # 光标下移 + 详情
+        assert app.main.view == "all" and len(app._visible_rows()) == 2
         await p.press("down")
         await p.pause(0.05)
-        assert app.c_idx == 1
+        assert app.main.index == 1
         await p.press("enter")
         await p.pause(0.1)
         assert app.page == "detail"
@@ -116,21 +108,21 @@ async def main() -> int:
         await p.press("f")
         await p.pause(0.2)
         assert app.page == "filters"
-        assert app.f_dim == 0 and app.f_query == ""
-        await p.press("a")          # 键入字符进入顶部搜索行
+        assert app.fv.dim == 0 and app.fv.query == ""
+        await p.press("a")
         await p.pause(0.1)
-        assert app.f_query == "a", "输入应进入顶部搜索行"
+        assert app.fv.query == "a", "输入应进入顶部搜索行"
         await p.press("backspace")
         await p.pause(0.1)
-        assert app.f_query == ""
+        assert app.fv.query == ""
         app._filters_type("英语")
-        assert app.f_query == "英语" and app._filters_items() == ["英语写作"], \
+        assert app.fv.query == "英语" and app._filters_items() == ["英语写作"], \
             "输入即筛应收窄列表"
-        app.f_query = ""
+        app.fv.query = ""
         app._render_filters_list()
         await p.press("tab")
         await p.pause(0.1)
-        assert app.f_dim == 1, "Tab 应切到课程类别"
+        assert app.fv.dim == 1, "Tab 应切到课程类别"
         await p.press("space")
         await p.pause(0.1)
         assert app.cfg.filters.categories == [], "空格应取消默认类别"
@@ -140,10 +132,10 @@ async def main() -> int:
         await p.press("enter")
         await p.pause(0.2)
         assert app.page == "main", "筛选回车应保存并返回"
-        # 再次进入，改动后 Esc 放弃
+        # 再进，改动后 Esc 放弃
         await p.press("f")
         await p.pause(0.2)
-        await p.press("tab")   # 课程类别
+        await p.press("tab")
         await p.pause(0.1)
         await p.press("space")
         await p.pause(0.1)
@@ -153,16 +145,16 @@ async def main() -> int:
         assert app.page == "main", "Esc 应放弃并返回"
         assert app.cfg.filters.categories == ["英语类"], "Esc 应还原修改"
 
-        # 筛选：无匹配输入 + 回车 = 作为自定义条目加入当前维度
+        # 筛选：无匹配输入 + 回车 = 自定义条目
         await p.press("f")
         await p.pause(0.2)
-        app.f_query = "物理学院课程"
+        app.fv.query = "物理学院课程"
         app._render_filters_list()
         await p.press("enter")
         await p.pause(0.2)
         assert "物理学院课程" in app.cfg.filters.names, "无匹配回车应加入自定义条目"
-        assert app.f_query == "", "加入后应清空搜索"
-        await p.press("enter")   # 空输入回车：保存并返回
+        assert app.fv.query == "", "加入后应清空搜索"
+        await p.press("enter")
         await p.pause(0.2)
         assert app.page == "main"
         assert "物理学院课程" in app.cfg.filters.names, "自定义条目应已保存"
@@ -181,20 +173,19 @@ async def main() -> int:
         await p.pause(0.1)
         assert app.page == "main"
 
-        # 设置：编辑收件邮箱 → ctrl+s 保存 → 主页
+        # 设置：编辑收件邮箱 → ctrl+s 保存 → 主页；再 Esc 放弃
         await p.press("s")
         await p.pause(0.2)
         assert app.page == "settings"
         for _ in range(2):
             await p.press("down")
         await p.pause(0.05)
-        _g, f = app.s_rows[app.s_idx]
+        _g, f = app.s_rows[app.sv.index]
         assert f["key"] == "to", f"光标应到收件邮箱，实际 {f['key']}"
         await p.press("enter")
         await p.pause(0.1)
-        assert app._editing == "settings" and app._editing_key == "to" \
+        assert app.editing.context == "settings" and app.editing.key == "to" \
             and app.editor.active, "回车应进入该行的行内编辑态"
-        # 原位编辑：保留值、←/→移动光标、退格删除光标前的字符
         app.editor.begin("ab")
         app._render_settings_list()
         await p.press("left")
@@ -206,13 +197,12 @@ async def main() -> int:
             "退格应删除光标前字符（原位，不清空重输）"
         app.editor.begin("x@y.com")
         app._render_settings_list()
-        await p.press("enter")      # 回车确认本行编辑
+        await p.press("enter")
         await p.pause(0.1)
-        assert app._editing is None and app.sd["to"] == "x@y.com", "回车应确认编辑"
+        assert app.editing.context is None and app.sd["to"] == "x@y.com", "回车应确认编辑"
         await p.press("ctrl+s")
         await p.pause(0.2)
         assert app.page == "main" and app.cfg.notify.to == "x@y.com", "ctrl+s 应保存并返回"
-        # 设置放弃：行内编辑确认后，Esc 离开不保存 → 还原
         await p.press("s")
         await p.pause(0.2)
         for _ in range(2):
@@ -234,7 +224,7 @@ async def main() -> int:
         qc = Config.load()
         qc.first_run_done = True
         qa = CourserApp(qc)
-        qa.auto_gather = False   # 测试不触发真实抓取
+        qa.fv.auto_gather = False   # 测试不触发真实抓取
         async with qa.run_test(size=(100, 30)) as p2:
             await p2.pause(0.3)
             if page_key:
@@ -250,7 +240,7 @@ async def main() -> int:
     for page_key in (None, "f", "s"):
         await _quit_case(page_key, "ctrl+c")
 
-    print("TUI smoke OK: setup/主页视图/详情/筛选/设置/日志/帮助 + q/Ctrl+C 均正常")
+    print("TUI 导航 OK: setup/主页视图/详情/筛选/设置/日志/帮助 + q/Ctrl+C 均正常")
     return 0
 
 
