@@ -1199,11 +1199,9 @@ class CourserApp(App):
     def _activity_fetching(self, w) -> str:
         """抓取过程中：• 状态 抓取中 · 进度 │ 已运行 Xs │ 来源 Google。"""
         seg = [f"{ui_meta('• 状态')}  {ui_warn('抓取中')}"]
-        if self.prog.done is not None:
-            if self.prog.total:
-                seg[0] += f" · {ui_value(f'{self.prog.done} / {self.prog.total} 步')}"
-            else:
-                seg[0] += f" · {ui_value(f'{self.prog.done} 步')}"
+        # 不显示步数，只显示当前正在做什么（登出/登录/读页/等待等）。
+        if self.prog.op:
+            seg[0] += f" · {ui_value(str(self.prog.op))}"
         elapsed = time.time() - w.current_round_started_at
         seg.append(f"{ui_meta('已运行')} {ui_value(f'{elapsed:.0f}s')}")
         seg.append(self._gmail_footer())
