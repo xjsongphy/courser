@@ -139,6 +139,27 @@ _EXTRACT_JS = r"""
 """
 
 
+class Progress:
+    """抓取进度：单调递增的步骤计数 + 当前操作描述 + 估算总步数。
+
+    sink(done, total, op) —— total 未知前为 None，页数翻出后变为稳定分母。
+    """
+
+    def __init__(self, sink: Optional[Callable[[int, Optional[int], str], None]] = None):
+        self.sink = sink or (lambda *_: None)
+        self.done = 0
+        self.total: Optional[int] = None
+
+    def step(self, op: str, total: Optional[int] = None) -> None:
+        self.done += 1
+        if total is not None:
+            self.total = total
+        try:
+            self.sink(self.done, self.total, op)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # 页面解析
 # ---------------------------------------------------------------------------
@@ -410,7 +431,8 @@ def _login_evidence(session: str) -> str:
 
 
 def login(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
-          force_logout: bool = True, log: Optional[Callable[[str], None]] = None) -> str:
+          force_logout: bool = True, log: Optional[Callable[[str], None]] = None,
+          prog: Optional[Progress] = None) -> str:
     """执行一轮登录。返回登录方式：'login_click'（点了登录）或 'sso_auto'（SSO 直接放行）。
 
     竞态说明（实测发现）：oauth.jsp 自动跳 ssoLogin.do 时地址栏会短暂出现
@@ -429,6 +451,8 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
                 sleep_rand(0.8, 1.6)
             except Exception:
                 pass
+            if prog:
+                prog.step("登出旧会话")
         oc.open(session, LOGIN_URL, window=window)
         sleep_rand(1.5, 3.5)  # 给密码管理器自动填充留时间
 
@@ -437,6 +461,8 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
             # 可能是中转页：等几秒确认没有回弹回登录页
             sleep_rand(2.0, 3.0)
             if _on_workable_page(session):
+                if prog:
+                    prog.step("已通过会话直接进入选课系统")
                 return "sso_auto"
             # 回弹到了登录表单，落到下面正常登录流程
 
@@ -507,6 +533,8 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
             pass
         if _poll_landed(session, timeout_s=20.0):
             return "login_click"
+        if prog:
+            prog.step("填写账号并点击登录")
         clicked = _click_logon(session)
         if _poll_landed(session, timeout_s=20.0):
             return "login_click"
@@ -549,7 +577,8 @@ def _find_supplement_tab(session: str) -> Optional[str]:
 
 
 def goto_supplement(session: str, window: Optional[str] = None,
-                    log: Optional[Callable[[str], None]] = None) -> str:
+                    log: Optional[Callable[[str], None]] = None,
+                    prog: Optional[Progress] = None) -> str:
     url = oc.get_url(session)
     if "SupplyCancel" in url or "supplement" in url:
         return url
@@ -577,6 +606,8 @@ def goto_supplement(session: str, window: Optional[str] = None,
             sleep_rand(0.8, 1.5)
             cur = oc.get_url(session)
             if "SupplyCancel" in cur or "supplement" in cur:
+                if prog:
+                    prog.step("已进入补退选页")
                 sleep_rand(1.0, 2.0)
                 return cur
             page = _find_supplement_tab(session)
@@ -599,7 +630,8 @@ def goto_supplement(session: str, window: Optional[str] = None,
 def walk_pages(session: str, window: Optional[str] = None,
                pacing: tuple[float, float] = (0.8, 2.0),
                max_pages: int = 100,
-               log: Optional[Callable[[str], None]] = None) -> tuple[list[Course], dict]:
+               log: Optional[Callable[[str], None]] = None,
+               prog: Optional[Progress] = None) -> tuple[list[Course], dict]:
     courses: list[Course] = []
     pages = 0
     warning_hit = False
@@ -632,6 +664,13 @@ def walk_pages(session: str, window: Optional[str] = None,
             data = oc.eval_js(session, _EXTRACT_JS)
             if isinstance(data, dict):
                 page_courses, pager, warned = _parse_page(data)
+        if prog is not None:
+            tot = (pager.get("total") if pager.get("total") else None) or None
+            if prog.total is None and tot:
+                prog.total = prog.done + tot
+            n = pages + 1
+            denom = tot or prog.total
+            prog.step(f"正在读取课程列表 第 {n}/{denom} 页" if denom else f"正在读取第 {n} 页")
         # 记录页码：邮件按选课网顺序（页号升序、同页从上到下）发送
         for c in page_courses:
             c.page = pages + 1
@@ -685,14 +724,20 @@ def walk_pages(session: str, window: Optional[str] = None,
 def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
                 pacing: tuple[float, float] = (0.8, 2.0),
                 force_logout: bool = True,
-                log: Optional[Callable[[str], None]] = None) -> FetchResult:
-    """完整一轮：登录 → 补退选 → 翻页抓取。"""
+                log: Optional[Callable[[str], None]] = None,
+                on_progress: Optional[Callable[[int, Optional[int], str], None]] = None) -> FetchResult:
+    """完整一轮：登录 → 补退选 → 翻页抓取。
+
+    on_progress(done, total, op)：实时报告抓取进度与当前操作（total 未知前为 None）。
+    """
     result = FetchResult()
+    prog = Progress(on_progress) if on_progress else None
     try:
         result.login_mode = login(session, creds=creds, window=window,
-                                  force_logout=force_logout, log=log)
-        goto_supplement(session, window=window, log=log)
-        result.courses, meta = walk_pages(session, window=window, pacing=pacing, log=log)
+                                  force_logout=force_logout, log=log, prog=prog)
+        goto_supplement(session, window=window, log=log, prog=prog)
+        result.courses, meta = walk_pages(session, window=window, pacing=pacing,
+                                          log=log, prog=prog)
         result.pages = meta.get("pages", 0)
         result.warning_hit = bool(meta.get("warning_hit"))
     except (FetchError, oc.OpenCliError) as exc:

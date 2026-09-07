@@ -44,7 +44,8 @@ class Watcher:
     """后台监控线程：周期执行一轮抓取。"""
 
     def __init__(self, cfg: Config, log: Callable[[str], None],
-                 on_round: Optional[Callable[[RoundResult], None]] = None):
+                 on_round: Optional[Callable[[RoundResult], None]] = None,
+                 on_progress: Optional[Callable[[int, Optional[int], str], None]] = None):
         self.cfg = cfg
         # 所有日志同时落盘 data/courser.log（TUI/CLI 两模式都覆盖）
         user_log = log
@@ -55,6 +56,7 @@ class Watcher:
 
         self.log = chained
         self.on_round = on_round or (lambda r: None)
+        self.on_progress = on_progress  # (done, total, op)；由 UI 提供，线程安全地更新
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.running = False
@@ -166,6 +168,7 @@ class Watcher:
         creds = {"username": self.cfg.credentials.username,
                  "password": self.cfg.credentials.password}
         self.log(f"开始新一轮抓取（登录方式：{'配置凭据' if creds.get('username') else '自动填充'}）…")
+        _prog = self.on_progress
         try:
             fr = fetch_round(
                 session=self.cfg.session,
@@ -174,6 +177,7 @@ class Watcher:
                 pacing=self.cfg.pacing,
                 force_logout=self.cfg.force_relogin,
                 log=self.log,
+                on_progress=_prog,
             )
             # 失败重试机制：整轮失败且非风控提示时，等 20~40 秒重试一次
             # （人类遇到失败也会再试一次；风控命中则绝不重试硬顶）
@@ -181,6 +185,8 @@ class Watcher:
                 self.log(f"本轮抓取失败：{fr.error}；等待约 "
                          f"{self.retry_delay_range[0]:.0f}~{self.retry_delay_range[1]:.0f} "
                          f"秒后重试一次…")
+                if _prog:
+                    _prog(0, None, "本轮失败，等待片刻后重试…")
                 time.sleep(random.uniform(*self.retry_delay_range))
                 fr = fetch_round(
                     session=self.cfg.session,
@@ -189,6 +195,7 @@ class Watcher:
                     pacing=self.cfg.pacing,
                     force_logout=self.cfg.force_relogin,
                     log=self.log,
+                    on_progress=_prog,
                 )
             r.login_mode = fr.login_mode
             r.pages = fr.pages

@@ -432,6 +432,7 @@ class CourserApp(App):
             with Vertical(id="page-main"):
                 yield Static("", id="summary", markup=True)
                 yield Static("", id="coursehead", markup=True)
+                yield Static("", id="progress", markup=True)
                 yield Static("", id="courselist", markup=True)
                 yield Static("", id="event", markup=True)
             # 筛选（pi 式：顶部输入即筛 + 列表，↑↓ 选，空格/回车 切换）
@@ -468,7 +469,8 @@ class CourserApp(App):
         yield Static("", id="runstate")
 
     def on_mount(self) -> None:
-        self.watcher = Watcher(self.cfg, log=self._thread_log, on_round=self._on_round)
+        self.watcher = Watcher(self.cfg, log=self._thread_log, on_round=self._on_round,
+                               on_progress=self._thread_progress)
         self._reset_runstate_interval()
         self._show("main")
         self._render_status_ticker()
@@ -489,8 +491,8 @@ class CourserApp(App):
                 "[cyan]1/2/3[/] 全部/筛选/空余 · [cyan]f[/] 筛选 · "
                 "[cyan]s[/] 设置 · [cyan]l[/] 日志 · [cyan]h[/] 帮助 · "
                 "[cyan]q[/] 退出",
-        "filters": "[cyan]输入即筛[/] · [cyan]↑↓[/] 移动 · [cyan]空格[/] 选中 · "
-                   "[cyan]回车[/] 选中/完成 · [cyan]Tab[/] 维度 · "
+        "filters": "[cyan]输入过滤[/] · [cyan]↑↓[/] 选择 · [cyan]空格[/] 选中/取消 · "
+                   "[cyan]回车[/] 确认 · [cyan]Tab[/] 维度 · "
                    "[cyan]Esc[/] 放弃并返回",
         "settings": "[cyan]↑↓[/] 选择 · [cyan]←/→[/] 切换选项 · [cyan]回车[/] 编辑 · "
                     "[cyan]t[/] 测试邮件 · [cyan]ctrl+s[/] 保存 · [cyan]Esc[/] 放弃",
@@ -701,9 +703,9 @@ class CourserApp(App):
             fs.update("[dim]正在抓取候选…（完成后会自动列出课程名 / 课程类别 / 开课院系）[/]")
         else:
             q = escape(self.f_query)
+            hint = ("（输入文字可过滤下方列表）" if not q else "")
             fs.update(f"[cyan]❯ 搜索：[/]{q}[cyan]▍[/]"
-                      f"[dim]  输入即筛 · ↑↓ 移动 · 空格选中/回车完成 · Tab 维度 · "
-                      f"esc 返回[/]")
+                      f"[dim] {hint}[/]".rstrip())
         items = self._filters_items()
         listw = self.query_one("#filters_list", Static)
         if not items:
@@ -913,10 +915,10 @@ class CourserApp(App):
             "  登出 → IAAA 登录（自动填充或设置内填学号/密码）→ 补退选\n"
             "  → 动态翻页读限/选 → 命中且空余经 gws 发邮件；人类节奏、绝不输验证码。\n\n"
             "[bold]筛选（f）[/]\n"
-            "  课程名 / 课程类别 / 开课院系三维度；顶部输入即筛（含中文），↑↓ 移动，\n"
-            "  空格 选中/取消；有匹配时回车选中该项，无匹配时回车把它作为自定义条目加入；\n"
-            "  Tab 切维度；在空搜索框回车保存，Esc 放弃（改动未保存前均不落盘）。\n"
-            "  主页课程列表用 ★ 标记符合筛选的课程。\n\n"
+            "  课程名 / 课程类别 / 开课院系三维度；直接输入即可过滤（支持中文），\n"
+            "  ↑↓ 选择，空格 选中/取消；有匹配时回车选中该项，无匹配时回车把它作为\n"
+            "  自定义条目加入；Tab 切维度；在空搜索框回车保存，Esc 放弃\n"
+            "  （改动未保存前均不落盘）。主页课程列表用 ★ 标记符合筛选的课程。\n\n"
             "[bold]设置（s）[/]\n"
             "  账号、邮件通知、轮询节奏、行为；t 测试邮件（只用当前改动，不保存）；\n"
             "  ctrl+s 保存，Esc 放弃。轮询间隔在「轮询节奏」里改。\n\n"
