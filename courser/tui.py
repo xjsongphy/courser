@@ -200,11 +200,11 @@ class HelpScreen(ModalScreen[None]):
                 "  登出旧会话 → 打开 IAAA 登录页 → 等待密码管理器自动填充"
                 "（或在「设置」里填学号/密码）→ 点登录 → 补退选 → 动态翻页读取 限数/已选\n\n"
                 "筛选（/filters 或 f）\n"
-                "  顶部输入框即输即滤（pi 风格）；回车切换选中/自定义添加；\n"
+                "  顶部输入框：输入即过滤课程；回车 添加/切换 选中；\n"
                 "  支持 课程名 / 课程类别 / 开课院系 三个维度，每维度可多选、可并存；\n"
-                "  m 切换「任一命中 / 全部命中」；d 删除条目。\n\n"
+                "  m 切换「满足任一条件 / 满足全部条件」；d 删除条目。\n\n"
                 "通知（/settings → 邮件通知）\n"
-                "  通过 gws（Google Workspace CLI）发送：请先 `gws auth login` 授权，\n"
+                "  通过 gws 发送：需先在命令行执行一次 gws auth login 完成授权，\n"
                 "  并在「设置」填写 收件邮箱（发件账号可选）；同课通知有冷却去重。\n\n"
                 "安全与节奏\n"
                 "  浏览器以后台窗口运行（不抢焦点，可打开 Dock/任务栏窗口实时查看）；\n"
@@ -229,7 +229,7 @@ class HelpScreen(ModalScreen[None]):
 
 
 # ---------------------------------------------------------------------------
-# 筛选管理（pi 风格：顶部查询输入即输即滤）
+# 筛选管理（顶部查询输入即输即滤）
 # ---------------------------------------------------------------------------
 
 class FilterScreen(ModalScreen[None]):
@@ -238,7 +238,7 @@ class FilterScreen(ModalScreen[None]):
         Binding("1", "group(0)", "课程名"),
         Binding("2", "group(1)", "课程类别"),
         Binding("3", "group(2)", "开课院系"),
-        Binding("m", "toggle_match", "任一/全部"),
+        Binding("m", "toggle_match", "组合方式"),
         Binding("c", "add_custom", "自定义添加"),
         Binding("d", "delete_entry", "删除条目"),
     ]
@@ -273,7 +273,8 @@ class FilterScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="filterscreen"):
-            yield Label("筛选管理 — 顶部输入即输即滤（pi 风格）", classes="help-title")
+            yield Label("筛选管理 — 顶部输入，输入即过滤；回车添加/切换选中",
+                        classes="help-title")
             yield Static(id="dim_label")
             yield Static(id="match_label")
             yield Input(placeholder="查询：输入即过滤；回车添加/切换选中", id="query")
@@ -292,7 +293,7 @@ class FilterScreen(ModalScreen[None]):
         self.query_one("#query", Input).focus()
         self.query_one("#fs_hint", Static).update(
             "[dim]1/2/3 维度  ↑↓ 选择  Enter 切换选中  c 自定义  d 删除"
-            "  m 任一/全部  Esc 完成并保存[/]")
+            "  m 满足任一/全部条件  Esc 保存并关闭[/]")
 
     def _group_id(self) -> str:
         return GROUPS[self.group_idx][0]
@@ -393,9 +394,9 @@ class FilterScreen(ModalScreen[None]):
 
     def _apply_match_label(self) -> None:
         mode = self._app().cfg.filters.match
-        text = ("命中模式：[bold green]任一命中[/]（命中任意一个维度即告警）"
+        text = ("组合方式：[bold green]满足任一条件[/]（任意一个维度满足即提醒）"
                 if mode == "any" else
-                "命中模式：[bold]全部命中[/]（所有非空维度都命中才告警）")
+                "组合方式：[bold]满足全部条件[/]（所有非空维度都满足才提醒）")
         self.query_one("#match_label", Static).update(text)
 
     def action_add_custom(self) -> None:
@@ -547,7 +548,7 @@ class SettingsScreen(ModalScreen[None]):
                     ("后台窗口（不抢焦点）", "background"),
                     ("前台窗口", "foreground")], "background", id="tgl_window")
                 yield ToggleRow("筛选组合", [
-                    ("任一命中", "any"), ("全部命中", "all")], "any", id="tgl_match")
+                    ("满足任一条件", "any"), ("满足全部条件", "all")], "any", id="tgl_match")
                 yield ToggleRow("每轮强制重新登录", [
                     ("关", "off"), ("开", "on")], "off", id="tgl_relogin")
 
@@ -667,7 +668,7 @@ class IntervalModal(ModalScreen[None]):
 
 class CourserApp(App):
     TITLE = "courser"
-    SUB_TITLE = "PKU 补退选空余名额监控（opencli + textual）"
+    SUB_TITLE = "PKU 补退选空余名额监控"
     CSS = APP_CSS
     BINDINGS = [
         # 应用级高优先级绑定：即使焦点在 Input 或任一 ModalScreen 中也可退出。
@@ -683,7 +684,7 @@ class CourserApp(App):
     ]
 
     VIEWS = ["all", "matched", "seats"]
-    VIEW_NAMES = {"all": "全部课程", "matched": "命中·按类别", "seats": "有空余名额"}
+    VIEW_NAMES = {"all": "全部课程", "matched": "符合筛选 · 按类别", "seats": "有空余名额"}
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -800,7 +801,7 @@ class CourserApp(App):
         if not self.courses:
             welcome.update(
                 "[bold]欢迎使用 courser[/]\n\n"
-                "监控北京大学补退选课程的空余名额，并在命中筛选条件时通知你。\n\n"
+                "监控北京大学补退选课程的空余名额，并在符合筛选条件时通知你。\n\n"
                 "[cyan]/start[/] 开始监控    [cyan]/fetch[/] 立即抓取一轮\n"
                 "[cyan]/filters[/] 设置课程筛选    [cyan]/settings[/] 配置账号、邮件与节奏\n\n"
                 "结果会显示在这里；运行过程会像对话记录一样保留在下方。")
@@ -859,7 +860,7 @@ class CourserApp(App):
                 "[cyan]/filters[/] 筛选  [cyan]/settings[/] 设置"
                 if height < 18 or width < 56 else
                 "[bold]欢迎使用 courser[/]\n\n"
-                "监控北京大学补退选课程的空余名额，并在命中筛选条件时通知你。\n\n"
+                "监控北京大学补退选课程的空余名额，并在符合筛选条件时通知你。\n\n"
                 "[cyan]/start[/] 开始监控    [cyan]/fetch[/] 立即抓取一轮\n"
                 "[cyan]/filters[/] 设置课程筛选    [cyan]/settings[/] 配置账号、邮件与节奏\n\n"
                 "结果会显示在这里；运行过程会像对话记录一样保留在下方。"

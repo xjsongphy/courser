@@ -46,6 +46,6 @@ class FilterSet:
     def describe(self) -> str:
         if self.filters.empty:
             return "（未配置筛选 → 不会告警）"
-        mode = "任一命中" if self.filters.match != "all" else "全部命中"
+        mode = "满足任一条件" if self.filters.match != "all" else "满足全部条件"
         parts = [f"{k}: {' / '.join(v)}" for k, v in self.filters.active_groups]
         return f"{mode} | " + " ; ".join(parts) if parts else "（未配置筛选）"
