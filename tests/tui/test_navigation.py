@@ -32,6 +32,26 @@ def _assert_no_gui_widgets(app) -> None:
         assert not app.query(wtype), f"界面中不应出现 {wtype.__name__}"
 
 
+def test_main_hint_data_aware():
+    """主页底栏只显示当前可用操作：无数据不提示/不响应列查找。"""
+    app = CourserApp(Config())
+    app.courses = []
+    assert "按列查找" not in app._main_hint(), "无数据不应提示按列查找"
+    assert "立即抓取" in app._main_hint()
+    assert app.main.search_col is None
+
+    # 有数据 → 显示查找
+    app.courses = [Course(course_no="001", name="X", quota=1, selected=0, avail=1)]
+    assert "按列查找" in app._main_hint()
+
+    # 查找态提示
+    app.main.search_col = "name"
+    assert "编辑查找" in app._main_hint() and "按列查找" not in app._main_hint()
+    app.main.search_col = None
+    assert "按列查找" in app._main_hint()
+    print("✓ 主页提示随有无数据 / 查找态动态显示")
+
+
 def _fake(app) -> None:
     app.courses = [
         Course(course_no="001", name="英语写作", category="英语类",
@@ -49,6 +69,7 @@ def _fake(app) -> None:
 
 
 async def main() -> int:
+    test_main_hint_data_aware()
     # ---- 首启设置：填邮箱 → 就绪 → 主页 ----
     cfg = Config.load()
     cfg.first_run_done = False

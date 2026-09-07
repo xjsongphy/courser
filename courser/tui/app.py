@@ -204,11 +204,12 @@ class CourserApp(App):
         return ui_ok("✓") if ok else ui_error("✗")
 
     def _gmail_footer(self) -> str:
-        """状态行最末的发件通道标记：gmail；未发过邮件则裸 gmail，发过缀 ✓/✗。"""
-        conn = self._google_status_markup()
-        if conn == ui_value("—"):
-            return ui_value("gmail")
-        return f"{ui_value('gmail')} {conn}"
+        """状态行最末的发件通道标记，按连通性染色：
+        灰=还没发过邮件（中性）、绿=上次发送成功、红=上次发送失败。"""
+        ok, _ts = notifier.last_mail_status()
+        if ok is None:
+            return ui_meta("gmail")
+        return ui_ok("gmail") if ok else ui_error("gmail")
 
     def _labeled(self, label: str, content: str) -> str:
         """主页 summary 的一行：左侧 label 退后并对齐，右侧 content 自带排版。"""
@@ -321,7 +322,12 @@ class CourserApp(App):
                 ("Enter", "编辑查找"), ("Tab", "换列"),
                 ("Esc", "退出查找"),
             )
-        return self.HINTS["main"]
+        # 基础操作：没有可展示的数据时，不提示需要数据才能用的操作（如查找/视图）
+        parts: list[tuple[str, str]] = [("空格", "开始/停止"), ("r", "立即抓取")]
+        if self.courses:
+            parts += [("/", "按列查找")]
+        parts += [("f", "筛选"), ("s", "设置"), ("l", "日志"), ("h", "帮助"), ("q", "退出")]
+        return _hint(*parts)
 
     def _render_search_line(self) -> None:
         """查找区：标题、查找列、输入值各占明确层级。"""
@@ -529,14 +535,8 @@ class CourserApp(App):
     # 页面切换
     # ------------------------------------------------------------------
     HINTS = {
-        "main": _hint(
-            ("空格", "开始/停止"), ("r", "立即抓取"),
-            ("1/2/3", "全部 / 筛选 / 空余"),
-            ("/", "按列查找"), ("f", "筛选"), ("s", "设置"),
-            ("l", "日志"), ("h", "帮助"),
-            ("q", "退出"),
-        ),
-        # 二级页面的 hint 直接渲染在内容末尾；这里保留短文本供编辑态复用。
+        # 主页提示为动态（随是否有数据、查找态变化），见 _main_hint()；
+        # 这里只保留二级页面与“查找态”之外的常量提示。
         "filters": _page_hint("Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃"),
         "settings": _page_hint("↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃"),
         "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回"),
@@ -618,6 +618,7 @@ class CourserApp(App):
     def _render_main(self, force: bool = False) -> None:
         if not force and self.page != "main":
             return
+        self.query_one("#keys", Static).update(self._main_hint())
         self.query_one("#brand", Static).update(
             ui_section("courser") + ui_meta(" — PKU 补退选空余名额监控"))
         # “课程”与筛选/通知使用同一标签列，选项内容从同一列起始。
@@ -1223,13 +1224,15 @@ class CourserApp(App):
         if w and w.countdown_s is not None:
             m, s = divmod(int(w.countdown_s), 60)
             cd = f"{m} 分 {s:02d} 秒"
-        seg.append(f"{ui_meta('下一轮')} {ui_value(cd)}")
+        # 空占位（—）用灰色，与 gmail 中性态一致；有实值时用默认前景。
+        nxt = ui_meta("—") if cd == "—" else ui_value(cd)
+        seg.append(f"{ui_meta('下一轮')} {nxt}")
         if w and w.last_result:
             last = (self._last_round_markup()
                     if w.last_result.ok
                     else ui_error(w.last_result.error or "失败"))
         else:
-            last = ui_value("—")
+            last = ui_meta("—")
         seg.append(f"{ui_meta('上一轮')} {last}")
         seg.append(self._gmail_footer())
         return " │ ".join(seg)
@@ -1404,7 +1407,7 @@ class CourserApp(App):
         elif k == "q":
             event.stop()
             self.exit()
-        elif k in ("/", "slash"):
+        elif k in ("/", "slash") and self.courses:
             event.stop()
             self._begin_search()
         elif k == "tab" and self.main.search_col:
