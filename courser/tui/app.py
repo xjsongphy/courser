@@ -203,6 +203,13 @@ class CourserApp(App):
             return ui_value("—")
         return ui_ok("✓") if ok else ui_error("✗")
 
+    def _gmail_footer(self) -> str:
+        """状态行最末的发件通道标记：gmail；未发过邮件则裸 gmail，发过缀 ✓/✗。"""
+        conn = self._google_status_markup()
+        if conn == ui_value("—"):
+            return ui_value("gmail")
+        return f"{ui_value('gmail')} {conn}"
+
     def _labeled(self, label: str, content: str) -> str:
         """主页 summary 的一行：左侧 label 退后并对齐，右侧 content 自带排版。"""
         # 这是 dashboard 的字段标题，不是辅助说明；不能和右侧 meta 一起 dim。
@@ -1198,8 +1205,7 @@ class CourserApp(App):
                 seg[0] += f" · {ui_value(f'{self.prog.done} 步')}"
         elapsed = time.time() - w.current_round_started_at
         seg.append(f"{ui_meta('已运行')} {ui_value(f'{elapsed:.0f}s')}")
-        seg.append(f"{ui_meta('来源')} {ui_value('Google')} "
-                   f"{self._google_status_markup()}")
+        seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
     def _activity_steady(self, w) -> str:
@@ -1225,8 +1231,7 @@ class CourserApp(App):
         else:
             last = ui_value("—")
         seg.append(f"{ui_meta('上一轮')} {last}")
-        seg.append(f"{ui_meta('来源')} {ui_value('Google')} "
-                   f"{self._google_status_markup()}")
+        seg.append(self._gmail_footer())
         return " │ ".join(seg)
 
     def _render_runstate(self) -> None:
