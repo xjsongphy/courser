@@ -66,6 +66,9 @@ uv run courser        # 启动 TUI；首次启动弹配置向导
 
 `config.json`（gitignored，不入库；TUI「设置」是唯一修改入口）：
 
+> 运行日志：每轮全量记录到 `data/courser.log`（gitignored，自动滚动），
+> 登录失败/发送失败/风控等现场都会写进去，排查问题先看它。
+
 ```jsonc
 {
   "first_run_done": false,          // 首次向导标记
@@ -109,6 +112,7 @@ uv run python scripts/smoke_tui.py         # TUI 无头冒烟
 courser/
 ├── courser/            # 核心包
 │   ├── opencli.py      # opencli 子进程封装
+│   ├── logfile.py      # 持久化日志 data/courser.log（自动滚动）
 │   ├── human.py        # 人类节奏：随机间隔、抖动
 │   ├── fetch.py        # 登录 → 补退选 → 动态翻页只读抓取
 │   ├── filters.py      # 三维度多值筛选

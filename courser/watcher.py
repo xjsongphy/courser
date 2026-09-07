@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import fetch, notifier, risk as riskmod
+from . import fetch, logfile, notifier, risk as riskmod
 from .config import Config, SEND_LOG_FILE, STATE_FILE
 from .filters import FilterSet
 from .human import jitter
@@ -45,7 +45,14 @@ class Watcher:
     def __init__(self, cfg: Config, log: Callable[[str], None],
                  on_round: Optional[Callable[[RoundResult], None]] = None):
         self.cfg = cfg
-        self.log = log
+        # 所有日志同时落盘 data/courser.log（TUI/CLI 两模式都覆盖）
+        user_log = log
+
+        def chained(msg: str) -> None:
+            user_log(msg)
+            logfile.log(msg)
+
+        self.log = chained
         self.on_round = on_round or (lambda r: None)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
