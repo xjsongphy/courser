@@ -65,6 +65,7 @@ class Course:
     status: str = ""                 # 选课状态：可申请 / 不可申请 / 已选上 / (空)
     seq: str = ""                    # 课程稳定 id（course_seq_no）
     links: dict = field(default_factory=dict)
+    page: int = 0                    # 在选课网列表中的页码（1 起）
 
     @property
     def has_seats(self) -> bool:
@@ -116,10 +117,13 @@ _EXTRACT_JS = r"""
     }
     return { header, rows: data };
   }
-  const tables = [...document.querySelectorAll('table')].map(parseTable).filter(Boolean);
+  const rawTables = [...document.querySelectorAll('table')];
+  const next = [...document.querySelectorAll('a')].find(a => norm(a.textContent) === 'Next');
+  const tables = rawTables
+    .map(el => { const p = parseTable(el); return p ? { el, ...p } : null; })
+    .filter(Boolean);
   const body = document.body.innerText || '';
   const pm = body.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
-  const next = [...document.querySelectorAll('a')].find(a => norm(a.textContent) === 'Next');
   return JSON.stringify({
     url: location.href,
     pager: pm ? { cur: +pm[1], total: +pm[2] } : null,
@@ -128,7 +132,8 @@ _EXTRACT_JS = r"""
     // 仅当页面连课程表都没有时才判定风控/警告（选课页常驻"请勿使用刷课机"
     // 警示条，不能因为静态文案就误报）
     warning: tables.length === 0 && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body),
-    tables: tables.map(t => ({ nrows: t.rows.length, header: t.header, rows: t.rows }))
+    tables: tables.map(({ el, ...rest }) => ({ ...rest,
+                                               pager_here: next ? el.contains(next) : false }))
   });
 })()
 """
@@ -195,14 +200,46 @@ def _parse_course(header: list[str], cells: list[str], links: list[dict]) -> Cou
     return c
 
 
+def _pick_electable_table(tables: list[dict]) -> Optional[dict]:
+    """挑出真正的「补退选可用列表」表格。
+
+    页面可能同时出现：外层包裹表（表头长度异常）、已选上列表、可用列表。
+    判定依据（由强到弱）：
+    1. 表头长度在 10~16 之间（排除把整页包进去的畸形表）；
+    2. 该表内包含翻页用的 Next 链接（分页只属于可用列表）；
+    3. 含 electSupplement.do（补选/刷新）链接的行数最多。
+    """
+    sane = [t for t in tables if 10 <= len(t.get("header") or []) <= 16]
+    if not sane:
+        sane = tables
+    for t in sane:
+        if t.get("pager_here"):
+            return t
+    best, best_score = None, -1
+    for t in sane:
+        score = sum(
+            1 for r in (t.get("rows") or [])
+            if any("electSupplement" in (l.get("h") or "") for l in (r.get("links") or []))
+        )
+        if score > best_score:
+            best, best_score = t, score
+    return best if best_score > 0 else (sane[0] if sane else None)
+
+
+def _sig(page_courses: list[Course]) -> str:
+    """本页课程签名（用于翻页是否生效的判重）。"""
+    head = page_courses[:3]
+    return "|".join(c.key for c in head) + f"#{len(page_courses)}"
+
+
 def _parse_page(data: dict) -> tuple[list[Course], dict, bool]:
-    """返回 (可用课程列表, 分页信息, 页面是否含风控提示语)。只关心第一个含课程表头的表格。"""
+    """返回 (可用课程列表, 分页信息, 页面是否含风控提示语)。"""
     courses: list[Course] = []
-    for t in data.get("tables") or []:
+    t = _pick_electable_table(data.get("tables") or [])
+    if t is not None:
         header, rows = t.get("header") or [], t.get("rows") or []
         for r in rows:
             courses.append(_parse_course(header, r.get("cells") or [], r.get("links") or []))
-        break  # 只取第一个课程列表表格（补退选可用列表）
     pager = data.get("pager") or {}
     return (courses,
             {"has_next": bool(data.get("has_next")),
@@ -253,7 +290,7 @@ def _wait_table(session: str, timeout_s: float = 20.0,
     while time.time() < deadline:
         if _table_ready(session):
             return True
-        sleep_rand(1.0, 2.0)
+        sleep_rand(0.5, 1.0)
     return False
 
 
@@ -277,7 +314,7 @@ def _on_workable_page(session: str) -> bool:
 def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        sleep_rand(1.5, 2.5)
+        sleep_rand(0.8, 1.5)
         if _on_workable_page(session):
             return True
     return False
@@ -382,7 +419,7 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
         # 等登录表单就位（重定向进行中 #logon_button 可能短暂不存在）
         deadline = time.time() + 12.0
         while time.time() < deadline and not _form_present(session):
-            sleep_rand(1.5, 2.5)
+            sleep_rand(0.8, 1.5)
         if not _form_present(session):
             login_errs.append(f"第{attempt}次：登录页未就位（无#logon_button），url={oc.get_url(session)}")
             continue
@@ -404,12 +441,12 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
         # 填凭据
         if creds and creds.get("username"):
             oc.fill(session, "input#user_name", creds["username"])
-            sleep_rand(0.6, 1.1)
+            sleep_rand(0.6, 1.2)
         if creds and creds.get("password"):
             oc.fill(session, "input#password", creds["password"])
-            sleep_rand(0.6, 1.1)
+            sleep_rand(0.6, 1.2)
         else:
-            sleep_rand(1.8, 3.2)  # 未配置密码：多等一会儿，信任自动填充
+            sleep_rand(0.8, 1.5)  # 未配置密码：等自动填充落盘（人类约1秒）
 
         if not _form_present(session):
             login_errs.append(f"第{attempt}次：填写后页面被重定向走（无#logon_button）")
@@ -433,7 +470,7 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
         # 未跳转再点登录按钮兜底
         try:
             oc.click(session, "#password")
-            sleep_rand(0.5, 1.0)
+            sleep_rand(0.6, 1.0)
         except Exception:
             pass
         try:
@@ -471,18 +508,45 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
 # 进入补退选
 # ---------------------------------------------------------------------------
 
+def _find_supplement_tab(session: str) -> Optional[str]:
+    """在会话标签页里找已打开补退选页的标签（点击可能开新标签）。"""
+    try:
+        for t in oc.tab_list(session):
+            u = t.get("url") or ""
+            if "SupplyCancel" in u or "supplement" in u:
+                return t.get("page") or ""
+    except Exception:
+        pass
+    return None
+
+
 def goto_supplement(session: str, window: Optional[str] = None,
                     log: Optional[Callable[[str], None]] = None) -> str:
     url = oc.get_url(session)
     if "SupplyCancel" in url or "supplement" in url:
         return url
-    # 帮助页的「选课时间表」里也可能出现"补退选"链接，取第一个（左侧菜单项）
-    oc.click(session, 'a[href*="SupplyCancel.do"]', nth=0)
-    if not _poll_url(session, "SupplyCancel", timeout_s=25.0, log=log) and \
-       not _poll_url(session, "supplement", timeout_s=10.0, log=log):
-        raise FetchError(f"无法进入补退选页面，当前 url={oc.get_url(session)}")
-    sleep_rand(1.5, 3.0)
-    return oc.get_url(session)
+    # 点左侧菜单（#menu）里的「补退选」入口，避免点到选课时间表里的同名链接
+    try:
+        oc.click(session, '#menu a[href*="SupplyCancel.do"]')
+    except Exception:
+        oc.click(session, 'a[href*="SupplyCancel.do"]', nth=0)
+    # 可能在当前页跳转，也可能新开标签页：两者都轮询处理
+    deadline = time.time() + 25.0
+    while time.time() < deadline:
+        sleep_rand(0.8, 1.5)
+        cur = oc.get_url(session)
+        if "SupplyCancel" in cur or "supplement" in cur:
+            sleep_rand(1.0, 2.0)
+            return cur
+        page = _find_supplement_tab(session)
+        if page:
+            try:
+                oc.tab_select(session, page)
+                sleep_rand(1.0, 2.0)
+                return oc.get_url(session)
+            except Exception:
+                pass
+    raise FetchError(f"无法进入补退选页面，当前 url={oc.get_url(session)}")
 
 
 # ---------------------------------------------------------------------------
@@ -490,12 +554,13 @@ def goto_supplement(session: str, window: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def walk_pages(session: str, window: Optional[str] = None,
-               pacing: tuple[float, float] = (1.0, 2.5),
+               pacing: tuple[float, float] = (0.8, 2.0),
                max_pages: int = 100,
                log: Optional[Callable[[str], None]] = None) -> tuple[list[Course], dict]:
     courses: list[Course] = []
     pages = 0
     warning_hit = False
+    prev_signature: Optional[str] = None
     meta = {"pages": 0, "finished": False, "warning_hit": False}
 
     while pages < max_pages:
@@ -524,9 +589,20 @@ def walk_pages(session: str, window: Optional[str] = None,
             data = oc.eval_js(session, _EXTRACT_JS)
             if isinstance(data, dict):
                 page_courses, pager, warned = _parse_page(data)
+        # 记录页码：邮件按选课网顺序（页号升序、同页从上到下）发送
+        for c in page_courses:
+            c.page = pages + 1
         courses.extend(page_courses)
         warning_hit = warning_hit or warned
         pages += 1
+
+        # 同页重复护栏：翻页点击失败时可能停在原页，连续两页内容完全一样就停
+        if pages >= 2 and page_courses and prev_signature == _sig(page_courses):
+            if log:
+                log("检测到重复页（翻页未生效），本轮提前结束")
+            meta["finished"] = True
+            break
+        prev_signature = _sig(page_courses) if page_courses else prev_signature
 
         if log:
             log(f"第 {pages} 页：{len(page_courses)} 门课（累计 {len(courses)}）")
@@ -549,14 +625,14 @@ def walk_pages(session: str, window: Optional[str] = None,
         sleep_rand(*pacing)
         clicked = oc.click_by(session, role="link", name="Next")
         if not clicked:
-            sleep_rand(1.5, 3.0)
+            sleep_rand(0.8, 1.5)
             clicked = oc.click_by(session, role="link", name="Next")
         if not clicked:
             if log:
                 log("翻页点击失败，本轮提前结束（不直接跳 URL）")
             meta["finished"] = True
             break
-        sleep_rand(1.0, 2.5)
+        sleep_rand(0.8, 1.8)
 
     meta["pages"] = pages
     meta["warning_hit"] = warning_hit
@@ -564,7 +640,7 @@ def walk_pages(session: str, window: Optional[str] = None,
 
 
 def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
-                pacing: tuple[float, float] = (1.0, 2.5),
+                pacing: tuple[float, float] = (0.8, 2.0),
                 force_logout: bool = True,
                 log: Optional[Callable[[str], None]] = None) -> FetchResult:
     """完整一轮：登录 → 补退选 → 翻页抓取。"""

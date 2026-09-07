@@ -147,6 +147,20 @@ def state(session: str) -> dict:
     return _extract_json(_run(session, ["state"])[0])
 
 
+def tab_list(session: str) -> list:
+    """列出会话内的标签页 [{page,url,title,...}, ...]。"""
+    out, _ = _run(session, ["tab", "list"])
+    try:
+        return _extract_json(out)
+    except OpenCliError:
+        return []
+
+
+def tab_select(session: str, page: str) -> dict:
+    """切换到指定标签页（page 为 tab list 里的标识）。"""
+    return _extract_json(_run(session, ["tab", "select", page])[0])
+
+
 def wait_selector(session: str, selector: str, timeout_ms: int = 15000) -> dict:
     return _extract_json(_run(session, ["wait", "selector", selector, "--timeout", str(timeout_ms)])[0])
 

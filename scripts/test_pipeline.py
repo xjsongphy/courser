@@ -32,6 +32,7 @@ os.environ["COURSER_LOG"] = str(_tmpenv / "courser.log")
 
 import courser.watcher as W  # noqa: E402
 from courser import fetch, notifier  # noqa: E402
+from courser.fetch import Course  # noqa: E402
 from courser.config import Config, Filters  # noqa: E402
 from courser.filters import FilterSet  # noqa: E402
 
@@ -165,16 +166,34 @@ def test_notify_and_send():
             html_part = part.get_payload(decode=True).decode("utf-8")
             break
     assert html_part, "邮件中没有 text/html 部分"
-    # 表格列与样式
-    for col in ["课程号", "课程名", "课程类别", "教师", "班号", "开课单位",
+    # 表格列与样式（含新增的「页」列）
+    for col in ["页", "课程号", "课程名", "课程类别", "教师", "班号", "开课单位",
                 "上课/考试信息", "限数/已选", "空余"]:
         assert col in html_part, f"缺少列 {col}"
     for banned in ["学分", "周学时", "年级", "选课状态", "自选P/NP", "状态"]:
         assert banned not in html_part, f"不应包含 {banned}"
-    # 居中：课程类别（th+td）、限数/已选（th+td）共 4 处
-    assert html_part.count('style="text-align:center;"') == 4, html_part
-    assert html_part.count("<th>") + html_part.count('<th style="text-align:center;">') == 9
-    print("✓ 发送：gws 命令、MIME、9 列表格、课程类别/限数已选居中、无学分/年级/状态")
+    # 居中：页(th+td)、课程类别(th+td)、限数/已选(th+td) 共 6 处
+    assert html_part.count('style="text-align:center;"') == 6, html_part
+    assert html_part.count("<th>") + html_part.count('<th style="text-align:center;">') == 10
+    print("✓ 发送：gws 命令、MIME、10 列表格（含页）、三类居中、无学分/年级/状态")
+
+
+def test_email_order_and_page():
+    """邮件需标注页码，且顺序与选课网一致（页号升序、同页从上到下——
+    该顺序由 walk_pages 逐页追加保证，build_body 保持输入顺序）。"""
+    from courser import notifier  # noqa: PLC0415
+    c2 = Course(course_no="P2", name="A课(第2页)", category="通识课(通识核心课III)",
+                dept="英语语言文学系", quota=50, selected=49, avail=1, page=2)
+    c1 = Course(course_no="P1", name="B课(第1页)", category="通识课(通识核心课III)",
+                dept="外国语学院", quota=50, selected=49, avail=1, page=1)
+    text, html_body = notifier.build_body([c2, c1], "ts")
+    # 输入顺序被保留（P2 在前），同时两种正文都带页码标注
+    assert text.find("P2") < text.find("P1")
+    assert "（第 2 页）" in text and "（第 1 页）" in text
+    assert html_body.find("P2") < html_body.find("P1")
+    # 页单元格内容正确
+    assert ">2</td>" in html_body and ">1</td>" in html_body
+    print("✓ 邮件：含页码标注；顺序保留 walk_pages 的选课网顺序")
 
 
 def test_budget_and_cooldown():
@@ -210,6 +229,7 @@ def main() -> int:
     test_parse()
     test_filter()
     test_notify_and_send()
+    test_email_order_and_page()
     test_budget_and_cooldown()
     print("=" * 60)
     print("全链路测试通过：解析 → 判断 → 冷却 → 预算 → 发送 ✅")

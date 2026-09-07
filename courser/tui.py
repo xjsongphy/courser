@@ -37,9 +37,9 @@ GROUPS = [("names", "课程名"), ("categories", "课程类别"), ("depts", "开
 
 TABLE_LAYOUTS = {
     "wide": [
-        ("no", "课程号", 10), ("name", "课程名", 28), ("cat", "课程类别", 22),
-        ("dept", "开课单位", 16), ("teacher", "教师", 16), ("seats", "限/选", 9),
-        ("avail", "空余", 6), ("status", "状态", 9),
+        ("page", "页", 4), ("no", "课程号", 10), ("name", "课程名", 26),
+        ("cat", "课程类别", 20), ("dept", "开课单位", 14), ("teacher", "教师", 14),
+        ("seats", "限/选", 9), ("avail", "空余", 6),
     ],
     "normal": [
         ("no", "课程号", 10), ("name", "课程名", 26), ("cat", "课程类别", 20),
@@ -683,7 +683,7 @@ class CourserApp(App):
     ]
 
     VIEWS = ["all", "matched", "seats"]
-    VIEW_NAMES = {"all": "全部课程", "matched": "命中筛选", "seats": "有空余名额"}
+    VIEW_NAMES = {"all": "全部课程", "matched": "命中·按类别", "seats": "有空余名额"}
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -811,12 +811,15 @@ class CourserApp(App):
         dt.display = True
         fs = FilterSet(self.cfg.filters)
         columns = [key for key, _label, _width in TABLE_LAYOUTS[self._table_layout]]
-        for c in self.courses:
+        # 命中视图：最近一次成功抓取中经过筛选的课程（不限空余），按课程类别排序
+        rows = list(self.courses)
+        if self.view == "matched":
+            rows = [c for c in rows if fs.matches(c)]
+            rows.sort(key=lambda c: c.category)  # 稳定排序：同类别保持选课网顺序
+        elif self.view == "seats":
+            rows = [c for c in rows if c.has_seats]
+        for c in rows:
             matched = fs.matches(c)
-            if self.view == "matched" and not matched:
-                continue
-            if self.view == "seats" and not c.has_seats:
-                continue
             seats = Text(f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw)
             avail = Text(str(c.avail), style="bold green" if c.has_seats else "dim red")
             name = Text(("★ " if matched else "") + c.name,
@@ -824,6 +827,7 @@ class CourserApp(App):
             values = {
                 "no": c.course_no, "name": name, "cat": c.category, "dept": c.dept,
                 "teacher": c.teacher, "seats": seats, "avail": avail, "status": c.status,
+                "page": str(c.page) if c.page else "—",
             }
             dt.add_row(*(values[column] for column in columns), key=c.key)
 

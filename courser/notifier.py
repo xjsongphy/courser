@@ -99,10 +99,11 @@ def build_body(courses: list, ts: str) -> tuple[str, str]:
 
 def _plain_body(courses: list, ts: str) -> str:
     lines = [f"补退选时空余名额提醒（{ts}）", "",
-             "以下课程符合你的筛选条件，且当前有空余名额：", ""]
+             "以下课程符合你的筛选条件，且当前有空余名额（按选课网顺序，从前往后）：", ""]
     for c in courses:
         seats = f"{c.selected}/{c.quota}（空余 {c.avail}）" if c.quota is not None else c.seats_raw
-        lines.append(f"• {c.name} [{c.course_no}]")
+        page = f"（第 {c.page} 页）" if c.page else ""
+        lines.append(f"• {c.name} [{c.course_no}] {page}")
         lines.append(f"    课程类别：{c.category}    开课单位：{c.dept}")
         lines.append(f"    教师：{c.teacher}    限数/已选：{seats}")
         if c.schedule:
@@ -124,7 +125,9 @@ def _html_body(courses: list, ts: str) -> str:
     for c in courses:
         seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
         avail = str(c.avail) if c.avail >= 0 else "—"
+        page = str(c.page) if c.page else "—"
         rows.append("<tr>" + "".join([
+            td(page, ' style="text-align:center;"'),
             td(c.course_no),
             td(c.name),
             td(c.category, ' style="text-align:center;"'),
@@ -139,11 +142,12 @@ def _html_body(courses: list, ts: str) -> str:
         "<html><body style=\"font-family:Helvetica,Arial,'PingFang SC','Microsoft YaHei',sans-serif;"
         "font-size:14px;color:#222;\">"
         f"<p>补退选时空余名额提醒（{esc(ts)}）</p>"
-        f"<p>以下 {len(courses)} 门课程符合筛选条件且当前有空余名额：</p>"
+        f"<p>以下 {len(courses)} 门课程符合筛选条件且当前有空余名额"
+        "（按选课网顺序，页数小的在前、同页在上面的在前）：</p>"
         "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\" "
         "style=\"border-collapse:collapse;border-color:#ccc;\">"
         "<thead><tr style=\"background:#eef2f8;\">"
-        "<th>课程号</th><th>课程名</th>"
+        "<th style=\"text-align:center;\">页</th><th>课程号</th><th>课程名</th>"
         "<th style=\"text-align:center;\">课程类别</th>"
         "<th>教师</th><th>班号</th><th>开课单位</th>"
         "<th>上课/考试信息</th>"

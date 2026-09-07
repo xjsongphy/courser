@@ -103,8 +103,8 @@ class Filters:
 class Config:
     interval_min: float = 8.0              # 轮询基本间隔（分钟），实际带随机抖动
     interval_jitter: float = 0.3           # 抖动比例（±30%）
-    page_delay_min: float = 1.0            # 相邻操作随机间隔下限（秒，人类速度）
-    page_delay_max: float = 2.5            # 相邻操作随机间隔上限（秒）
+    page_delay_min: float = 0.8           # 相邻操作随机间隔下限（秒，人类速度）
+    page_delay_max: float = 2.0            # 相邻操作随机间隔上限（秒）
     credentials: Credentials = field(default_factory=Credentials)
     filters: Filters = field(default_factory=Filters)
     notify: Notify = field(default_factory=Notify)
