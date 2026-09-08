@@ -180,6 +180,30 @@ async def test_settings_wheel_does_not_change_selection() -> None:
     print("✓ 设置页滚轮只滚 viewport，不改 selection")
 
 
+async def test_settings_arrow_scroll_minimal_follow():
+    """设置页 ↑↓：可视区内移动不改滚动条，越界才最小跟随（不钉顶）。
+    回归：坐标统一走 scroll_to_region + scrollable_content_region，避免 off-by-N。"""
+    app = _fresh()
+    async with app.run_test(size=(100, 22)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        sc = app.query_one("#settingsscroll")
+        assert sc.scrollable_content_region.height > 0, "滚动容器应有真实 viewport"
+        s0 = float(sc.scroll_y)
+        # 可视区内往下几行：滚动条不动
+        for _ in range(4):
+            await pilot.press("down")
+            await pilot.pause(0.03)
+        assert float(sc.scroll_y) == s0, "可视区内 ↑↓ 不应移动滚动条"
+        # 跳到末尾：最小必要跟随（光标保持可见）
+        for _ in range(len(app.s_rows) + 2):
+            await pilot.press("down")
+            await pilot.pause(0.02)
+        assert float(sc.scroll_y) == float(sc.max_scroll_y), "越界应最小跟随到末尾"
+    print("✓ 设置页 ↑↓ 最小跟随：可视区内不动，越界才滚")
+
+
 async def test_help_logs_detail_have_wheel_scrollable_view() -> None:
     """帮助 / 日志 / 详情页都是可滚 FocusScroll（mouse=True 下可滚轮滚动）。"""
     app = _fresh()
@@ -218,6 +242,7 @@ async def main() -> int:
     await test_empty_selection_does_not_copy()
     await test_auto_copy_does_not_change_state()
     await test_settings_wheel_does_not_change_selection()
+    await test_settings_arrow_scroll_minimal_follow()
     await test_help_logs_detail_have_wheel_scrollable_view()
     print("文本选择 + 自动复制结构/行为检查 OK：mouse=True · 拖动选择 · 自动复制 · 空选区忽略 · 不改变状态 · 滚轮解耦")
     return 0

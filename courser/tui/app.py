@@ -42,6 +42,7 @@ from textual import on, events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.geometry import Region
 from textual.widgets import Static
 
 from .. import notifier
@@ -1185,22 +1186,22 @@ class CourserApp(App):
         return _hint(*parts)
 
     def _scroll_settings_to_selection(self) -> None:
-        """↑↓ 移动设置项时保持选中行可见，但**不把滚动条钉到顶部**：
-        只要选中行还在当前可视区，就完全不动滚动位置；越界才以最小步长跟随。
-        这样滚轮滚动与光标移动彼此独立，光标在可视区内来回移动不会拖动整个列表。"""
+        """↑↓ 移动设置项时保持选中行可见，但**不把滚动条钉到顶部**：交给 Textual 的
+        scroll_to_region 做最小必要滚动（选中行已在真实 viewport 内则完全不动）。
+        不再手工推算 top/bottom——row_y 是 #settings_list 局部行号，先用 virtual_region
+        换算成 #settingsscroll 内容坐标，避免坐标系混用导致 off-by-N。"""
         try:
             scroll = self.query_one("#settingsscroll", FocusScroll)
+            body = self.query_one("#settings_list", Static)
         except Exception:
             return
-        y = self.sv.row_y.get(self.sv.index, 0)
-        scroll_y = scroll.scroll_y or 0
-        view_h = max(1, int(scroll.size.height))
-        top, bottom = int(scroll_y), int(scroll_y) + view_h - 1
-        if top <= y <= bottom:
-            return  # 已在可视区：↑↓ 不动滚动条
-        # 越界才滚：向上到选中行 / 向下让它刚好进可视区底
-        target = y if y < top else max(0, y - view_h + 1)
-        scroll.scroll_to(y=target, animate=False)
+        row = Region(
+            0,
+            body.virtual_region.y + self.sv.row_y.get(self.sv.index, 0),
+            scroll.scrollable_content_region.width,
+            1,
+        )
+        scroll.scroll_to_region(row, animate=False, force=True)
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
     _EDIT_HINT = _hint(
