@@ -188,6 +188,26 @@ FocusScroll {
     padding: 0 4;
     margin: 0 0 1 0;   /* 状态栏不贴底：与上方提示行的留白（#keys padding-bottom 1）对称 */
 }
+
+/* 复制成功提示：overlay 不占布局、不移动 footer / viewport，极简一行自动消失 */
+ToastRack {
+    align: center bottom;
+    padding: 0 0 2 0;
+}
+
+Toast {
+    width: auto;
+    height: 1;
+    min-height: 1;
+    padding: 0 2;
+    border: none;
+    background: #202020;
+    color: #cccccc;
+}
+
+Toast .toast--title {
+    display: none;
+}
 """
 
 
