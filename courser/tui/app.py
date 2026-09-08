@@ -97,10 +97,11 @@ def _console_measure(renderable) -> int:
 
 # 单元格对齐：数字列右对齐、文本列左对齐（表头/数据共用）
 ALIGN = {
-    # 页数/课程类别/限选已选居中；空余与表头同起点，避免不同位数视觉跳动。
-    "page": "center", "no": "left", "name": "left",
-    "cat": "center", "dept": "left", "teacher": "left",
-    "seats": "center", "avail": "left",
+    # 数值列（页数/限选已选/空余）一律右对齐，数字按个位对齐、不同位数不跳动；
+    # 文本/ID 列左对齐（课程类别也左对齐——居中会显得"漂"在中间）。
+    "page": "right", "no": "left", "name": "left",
+    "cat": "left", "dept": "left", "teacher": "left",
+    "seats": "right", "avail": "right",
 }
 
 # 数值列绝不折行：页数/课程号/限选已选/空余 只占一个物理行
@@ -1698,6 +1699,8 @@ class CourserApp(App):
                 i for i, course in enumerate(rows)
                 if (course.page or 0) == target_page
             )
+        # 光标定位到本页首门课，并让它落在可视区域第一行（而非掉到底部）
+        self.main.top = self.main.index
         self._render_course_window(rows)
 
     def _open_detail(self) -> None:

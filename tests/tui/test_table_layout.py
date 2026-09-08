@@ -187,15 +187,15 @@ def test_required_columns_present_and_name_readable():
     print("✓ 所有列始终存在；课程名有正宽度（文本列靠折行、不截断）")
 
 
-def test_availability_values_share_left_edge():
-    """空余列与表头同起点，1/2/3 位数不随长度横跳。"""
+def test_availability_values_align_right():
+    """空余/数值列右对齐，数字按个位对齐、不随位数横跳。"""
     app = _make_app()
     cols = app._columns(120)
     avail_w = next(width for key, _label, width in cols if key == "avail")
     for avail in (0, 18, 152):
         cell = app._align_cell(str(avail), avail_w, app._col_justify("avail"))
-        assert cell.index(str(avail)) == 0, repr(cell)
-    print("✓ 空余数值与表头同起点")
+        assert cell.endswith(str(avail)), repr(cell)
+    print("✓ 空余右对齐，数字按个位对齐")
 
 
 def main() -> int:
@@ -205,7 +205,7 @@ def main() -> int:
     test_matched_star_confined_to_name_cell()
     test_long_name_wrap_preserved()
     test_required_columns_present_and_name_readable()
-    test_availability_values_share_left_edge()
+    test_availability_values_align_right()
     print("=" * 60)
     print("表格布局不变量测试通过 ✅")
     return 0
