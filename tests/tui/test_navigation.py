@@ -76,6 +76,12 @@ async def _search_courses():
     base.append(Course(course_no="002", name="英语写作", category="通识课(通选课I)",
                        dept="外国语学院", quota=50, selected=0, avail=1,
                        seq="s9", page=2))
+    base.append(Course(course_no="003", name="高等数学", category="公共基础",
+                       dept="数学科学学院", quota=80, selected=0, avail=1,
+                       seq="s10", page=3))
+    base.append(Course(course_no="004", name="数学分析", category="专业必修",
+                       dept="数学科学学院", quota=40, selected=0, avail=1,
+                       seq="s11", page=3))
     return base
 
 
@@ -104,6 +110,19 @@ async def test_search_browse():
         await p.pause(0.05)
         assert app.editing.context == "search", "编辑态应保持"
         assert app.main.index == min(i0 + 1, len(rows) - 1), "↓ 应浏览结果列表"
+        # 结果集变化 → 光标回到顶部第一条（不应停在旧 index / 空区域）
+        app.editor.begin("数学", "text")  # 从「近代×5」切到「高等数学+数学分析×2」
+        app._render_main(force=True)
+        await p.pause(0.05)  # 让 call_after_refresh 的课程重排执行复位
+        rows2 = app._visible_rows()
+        assert len(rows2) == 2 and rows2 != rows, \
+            f"应切成新的非空结果集，实得 {len(rows2)}"
+        assert app.main.index == 0, f"筛选改变后光标应回到顶部，实际 {app.main.index}"
+        assert app.main.top == 0, f"筛选改变后滚顶应回零，实际 {app.main.top}"
+        # 纯 ↑↓ 浏览不再触发复位（签名未变）
+        await p.press("down")
+        await p.pause(0.05)
+        assert app.main.index == 1, "纯浏览不应被复位"
         # Esc 退出整个查找
         await p.press("escape")
         await p.pause(0.05)

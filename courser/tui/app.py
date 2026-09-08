@@ -801,6 +801,13 @@ class CourserApp(App):
 
     def _render_course_window(self, rows: list[Course]) -> None:
         body = self.query_one("#courselist", Static)
+        # 结果集变化 → 回到顶部第一条（fzf / lazygit 语义）。仅当「视图 / 查找列 /
+        # 查找词」三者构成的筛选签名改变时才复位 index/top=0；纯 ↑↓/翻页浏览不改
+        # 签名，不打断当前位置。空结果也在此复位，下次有结果时从顶部开始。
+        sig = (self.main.view, self.main.search_col, self._search_effective_query())
+        if sig != self.main.filter_sig:
+            self.main.filter_sig = sig
+            self.main.reset_cursor()
         if not rows:
             # 抓取已经开始后，进度区已经说明当前发生了什么；列表区保持安静。
             if self.prog.done is not None:

@@ -21,6 +21,8 @@ class MainViewState:
     snapshot_meta: str = ""
     search_col: Optional[str] = None   # 当前查找列（page/no/name/cat/…）；None = 未启用
     search_query: str = ""             # 已生效的查找词（编辑中取 FieldEditor 缓冲）
+    filter_sig: Optional[tuple] = None  # 最近生效的结果集筛选签名 (view, search_col, query)；
+                                        # 签名变化时把光标回到顶部（见 _render_course_window）
 
     def reset_cursor(self) -> None:
         self.index = 0
