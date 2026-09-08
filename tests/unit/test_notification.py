@@ -79,11 +79,18 @@ def test_build_body_columns():
              dept="外国语学院", page=2, quota=50, selected=49)
     c1 = _mk(course_no="P1", name="B课(第1页)", page=1, quota=50, selected=49, avail=1)
     text, html_body = notifier.build_body([c2, c1], "ts")
-    # 顺序保留（walk_pages 顺序承诺），且都带页码
-    assert text.find("P2") < text.find("P1")
+    # 邮件按选课网顺序稳定排序：页码小的在前。
+    assert text.find("P1") < text.find("P2")
     assert "（第 2 页）" in text and "（第 1 页）" in text
-    assert html_body.find("P2") < html_body.find("P1")
+    assert html_body.find("P1") < html_body.find("P2")
     assert ">2</td>" in html_body and ">1</td>" in html_body
+    assert "按选课网顺序" not in text and "按选课网顺序" not in html_body
+
+    same_a = _mk(course_no="S1", name="同页上方", page=1)
+    same_b = _mk(course_no="S2", name="同页下方", page=1)
+    same_text, _ = notifier.build_body([same_a, same_b], "ts")
+    assert same_text.find("S1") < same_text.find("S2"), \
+        "同页应保持抓取到的上/下顺序"
 
     # 表格列与样式
     for col in ["页", "课程号", "课程名", "课程类别", "教师", "班号", "开课单位",

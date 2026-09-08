@@ -22,7 +22,7 @@ from email.message import EmailMessage
 from typing import Callable, Optional
 
 from .config import Notify
-from .course_table import course_display, seats_display
+from .course_table import course_display, ordered_courses, seats_display
 
 _GWS = "gws"
 _AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
@@ -106,8 +106,8 @@ def build_body(courses: list, ts: str) -> tuple[str, str]:
 
 def _plain_body(courses: list, ts: str) -> str:
     lines = [f"补退选时空余名额提醒（{ts}）", "",
-             "以下课程符合你的筛选条件，且当前有空余名额（按选课网顺序，从前往后）：", ""]
-    for c in courses:
+             "以下课程符合你的筛选条件，且当前有空余名额：", ""]
+    for c in ordered_courses(courses):
         seats = seats_display(c)
         page = f"（第 {c.page} 页）" if c.page else ""
         lines.append(f"• {c.name} [{c.course_no}] {page}")
@@ -129,7 +129,7 @@ def _html_body(courses: list, ts: str) -> str:
         return f"<td{extra}>{esc(value)}</td>"
 
     rows = []
-    for c in courses:
+    for c in ordered_courses(courses):
         page = course_display(c, "page")
         rows.append("<tr>" + "".join([
             td(page, ' style="text-align:center;"'),
@@ -148,8 +148,7 @@ def _html_body(courses: list, ts: str) -> str:
         "<html><body style=\"font-family:Helvetica,Arial,'PingFang SC','Microsoft YaHei',sans-serif;"
         "font-size:14px;color:#222;\">"
         f"<p>补退选时空余名额提醒（{esc(ts)}）</p>"
-        f"<p>以下 {len(courses)} 门课程符合筛选条件且当前有空余名额"
-        "（按选课网顺序，页数小的在前、同页在上面的在前）：</p>"
+        f"<p>以下 {len(courses)} 门课程符合筛选条件且当前有空余名额：</p>"
         "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\" "
         "style=\"border-collapse:collapse;border-color:#ccc;\">"
         "<thead><tr style=\"background:#eef2f8;\">"
@@ -169,6 +168,7 @@ def _html_body(courses: list, ts: str) -> str:
 
 
 def build_subject(courses: list) -> str:
+    courses = ordered_courses(courses)
     names = "、".join(c.name for c in courses[:3])
     if len(courses) > 3:
         names += f" 等{len(courses)}门"

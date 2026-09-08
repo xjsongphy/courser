@@ -106,6 +106,16 @@ def course_display(c: Course, key: str) -> str:
     return ""
 
 
+def course_order_key(c: Course) -> tuple[int]:
+    """选课网顺序：页码升序；同页保持原始列表顺序。"""
+    return (c.page if c.page > 0 else 10**9,)
+
+
+def ordered_courses(courses: list[Course]) -> list[Course]:
+    """按选课网顺序返回课程副本；Python 稳定排序保留同页上下顺序。"""
+    return sorted(courses, key=course_order_key)
+
+
 def seats_display(c: Course) -> str:
     """限选/已选 合并串（邮件纯文本等散文场景用）；缺失回退原始串。"""
     if c.quota is not None and c.selected is not None:
