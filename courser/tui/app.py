@@ -72,6 +72,8 @@ _field_mutate = field_mutate
 
 # 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
 _ACTIVITY_PAGES = {"main", "filters", "settings", "logs", "detail"}
+# 全局底部操作栏（#keys）展示的页面：与 activity 同，都是有稳定底部操作提示的页面。
+_KEYS_PAGES = {"main", "filters", "settings", "logs", "detail"}
 
 def _compact_dt(dt: datetime) -> str:
     """把时间压成随年龄递减的紧凑格式：今天 HH:MM；昨天 "昨天 HH:MM"；
@@ -262,7 +264,7 @@ class CourserApp(App):
         elif self.main.view == "seats":
             rows = [c for c in rows if c.has_seats]
         if self.main.search_col:
-            q = self._search_effective_query().strip().lower()
+            q = self.main.search_query.strip().lower()
             if q:
                 rows = [c for c in rows
                         if q in self._row_search_text(c, self.main.search_col).lower()]
@@ -281,15 +283,13 @@ class CourserApp(App):
         return self.main.search_col or ""
 
     def _begin_search(self) -> None:
-        """启动查找：默认按课程名列，弹出输入框；输入即筛。
+        """启动查找：默认按课程名列，弹出编辑器；live filter。
 
-        记录本次编辑是否来自『搜索浏览态』（已有已生效查找列）——
-        决定编辑态 Esc 是返回原搜索结果继续浏览，还是回普通主页。
+        没有『编辑/浏览』区分：只要没按 Esc 就保持编辑态，关键词即编辑缓冲，
+        每次内容变化同步到 main.search_query（canonical）；Enter 直接打开详情。
         """
-        self.main.search_edit_from_browse = self.main.search_col is not None
         if self.main.search_col is None:
             self.main.search_col = "name"
-        # 以已确认关键词为 draft 打开编辑器，caret 默认置于末尾 → 可继续增补
         self.editor.begin(self.main.search_query, "text")
         self.editing.context = "search"
         self.editing.key = "query"
@@ -308,31 +308,12 @@ class CourserApp(App):
         self.log_line(f"查找列：{cols[nxt][1]}")
         self._render_main(force=True)
 
-    def _search_effective_query(self) -> str:
-        """编辑中输入即筛：取编辑器缓冲；否则取已生效的查找词。"""
-        if self.editing.context == "search":
-            return self.editor.text
-        return self.main.search_query
-
     def _clear_search(self) -> None:
         self.main.search_col = None
         self.main.search_query = ""
 
-    def _cancel_search_edit(self) -> None:
-        """放弃本次 draft（编辑态 Esc）。若来自搜索浏览态，恢复原已确认关键词继续浏览；
-        若从普通主页进入，则彻底退出搜索。main.search_query 从未被修改，
-        因此从浏览态进入时自然恢复原已确认关键词。"""
-        from_browse = self.main.search_edit_from_browse
-        self.main.search_edit_from_browse = False
-        self._clear_editing()
-        if not from_browse:
-            self._clear_search()
-        self.main.reset_cursor()
-        self._render_main(force=True)
-
     def _leave_search(self) -> None:
-        """彻底退出搜索，恢复普通主页（仅搜索浏览态按 Esc 触发）。"""
-        self.main.search_edit_from_browse = False
+        """彻底退出搜索，恢复普通主页（搜索中按 Esc 触发）。"""
         self._clear_search()
         if self.editing.context == "search":
             self._clear_editing()
@@ -341,32 +322,23 @@ class CourserApp(App):
         self._render_main(force=True)
 
     def _main_hint(self) -> str:
-        """主页底部只显示当前状态下真正可用的操作；提示与搜索状态机一一对应。
-        宽屏用完整关键词，窄屏自动压缩（只是提示文字变短，按键能力不变）。"""
+        """主页底部只显示当前状态下真正可用的操作。搜索是持续 live filter：
+        编辑态常开，Enter 直接打开详情；宽屏用完整关键词，窄屏自动压缩。"""
         wide = self.size.width >= 115
-        if self.editing.context == "search":
-            # 搜索编辑态：←→ 是移动输入光标（不是跳页）；Esc 取消本次修改。
-            if wide:
-                return _hint(
-                    ("←→", "移动输入光标"), ("↑↓ / PgUp / PgDn", "浏览结果"),
-                    ("Tab", "换列"), ("Enter", "确认"), ("Esc", "取消修改"))
-            return _hint(
-                ("←→", "输入光标"), ("↑↓/PgUp/PgDn", "浏览"),
-                ("Tab", "换列"), ("Enter", "确认"), ("Esc", "取消"))
         if self.main.search_col:
-            # 搜索浏览态
             if wide:
                 return _hint(
-                    ("↑↓ / PgUp / PgDn", "浏览结果"), ("←→", "跳转页数"),
-                    ("/", "编辑关键词"), ("Tab", "换列"),
+                    ("←→", "编辑关键词"), ("↑↓ / PgUp / PgDn", "浏览结果"),
+                    ("[ ]", "跳转页数"), ("Tab", "换列"),
                     ("Enter", "查看详情"), ("Esc", "退出查找"))
             return _hint(
-                ("↑↓/PgUp/PgDn", "浏览"), ("←→", "跳页"), ("/", "编辑"),
-                ("Tab", "换列"), ("Enter", "详情"), ("Esc", "退出"))
+                ("←→", "编辑关键词"), ("↑↓/PgUp/PgDn", "浏览"),
+                ("[ ]", "跳页"), ("Tab", "换列"),
+                ("Enter", "详情"), ("Esc", "退出"))
         # 基础操作：没有可展示的数据时，不提示需要数据才能用的操作（如查找/视图）
         parts: list[tuple[str, str]] = [("空格", "开始/停止"), ("r", "立即抓取")]
         if self.courses:
-            parts += [("↑↓", "选择课程"), ("←→", "跳转页数"), ("/", "按列查找")]
+            parts += [("↑↓", "选择课程"), ("[ ]", "跳转页数"), ("/", "按列查找")]
         parts += [("f", "筛选"), ("s", "设置"), ("l", "日志"), ("h", "帮助"), ("q", "退出")]
         return _hint(*parts)
 
@@ -379,9 +351,7 @@ class CourserApp(App):
             return
         si.display = True
         label = ui_key(self._search_col_label())
-        value = (self.editor.markup()
-                 if self.editing.context == "search"
-                 else ui_value(self.main.search_query or "（未输入）"))
+        value = self.editor.markup()
         si.update("\n".join([
             ui_section("查找"),
             _kv_row("列名", label, width=6),
@@ -549,7 +519,8 @@ class CourserApp(App):
             # 设置（行内编辑，无独立输入框）
             with Vertical(id="page-settings"):
                 yield Static("", id="settings_hdr", markup=True)
-                yield Static("", id="settings_list", markup=True)
+                with FocusScroll(id="settingsscroll"):
+                    yield Static("", id="settings_list", markup=True)
             # 日志
             with Vertical(id="page-logs"):
                 with FocusScroll(id="logscroll"):
@@ -592,10 +563,10 @@ class CourserApp(App):
         # 主页提示为动态（随是否有数据、查找态变化），见 _main_hint()；
         # 这里只保留二级页面与“查找态”之外的常量提示。
         "filters": _page_hint("Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃"),
-        "settings": _page_hint("↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃"),
+        "settings": _page_hint("↑↓ 选择 · 回车 编辑/执行 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃"),
         "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回"),
         "help": _page_hint(),
-        "detail": _page_hint(),
+        "detail": _page_hint("Esc 返回"),
         "setup": _page_hint("↓ 编辑收件邮箱 · 回车 继续 · Esc 退出程序"),
     }
 
@@ -632,9 +603,13 @@ class CourserApp(App):
             self._anchor_focus()
             self._render_main(force=True)
         keys = self.query_one("#keys", Static)
-        keys.display = page == "main"
+        keys.display = page in _KEYS_PAGES
         if page == "main":
             keys.update(self._main_hint())
+        elif page == "settings":
+            keys.update(self._settings_hint())
+        elif page in _KEYS_PAGES:
+            keys.update(self.HINTS.get(page, ""))
         self.query_one("#activity", Static).display = page in _ACTIVITY_PAGES
         self._render_runstate()
 
@@ -1015,8 +990,7 @@ class CourserApp(App):
         listw = self.query_one("#filters_list", Static)
         if not items:
             if self.fv.gathering:
-                listw.update(_page_hint(
-                    "Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃"))
+                listw.update(ui_meta("正在抓取候选，列表待生成…"))
                 return
             if self.fv.query:
                 if self._dim_custom_allowed():
@@ -1034,8 +1008,7 @@ class CourserApp(App):
                     message = ("本维度暂无可选的课程类别。\n"
                                "候选取自最近一次抓取结果（自动探测）。\n"
                                "还没有结果时，在主页按 r 抓一轮。")
-            listw.update("\n".join([ui_meta(message), "", _page_hint(
-                "Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃")]))
+            listw.update("\n".join([ui_meta(message), ""]))
             return
         if self.fv.index >= len(items):
             self.fv.index = len(items) - 1
@@ -1053,8 +1026,6 @@ class CourserApp(App):
             mark = "[cyan]✓[/]" if it in entries else " "
             extra = " [dim](手动添加)[/]" if it not in cands else ""
             out.append(f"{cur} {mark} {ui_value(it)}{extra}")
-        out.extend(["", _page_hint(
-            "Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃")])
         listw.update("\n".join(out))
 
     def _filters_move(self, step: int) -> None:
@@ -1127,6 +1098,7 @@ class CourserApp(App):
         self.sv.index = 0
         self._render_settings_list()
         self.set_focus(None)
+        self.call_after_refresh(self._scroll_settings_to_selection)  # 首次布局未定，延迟一下
 
     def _render_settings_list(self) -> None:
         hdr = self.query_one("#settings_hdr", Static)
@@ -1142,6 +1114,7 @@ class CourserApp(App):
             "行为": ("浏览器", "会话与窗口行为"),
         }
         out = [f"{ui_label('gws')} {gws}\n"]
+        row_y: dict[int, int] = {}
         last = None
         for i, (gname, f) in enumerate(self.s_rows):
             if gname != last:
@@ -1152,6 +1125,7 @@ class CourserApp(App):
                 if note:
                     out.append(ui_meta(f"  {note}"))
                 last = gname
+            row_y[i] = len(out)   # 记录该字段行在正文中的起始行号（供自动滚动）
             cur = "[cyan]❯[/]" if i == self.sv.index else " "
             if (i == self.sv.index and self.editing.context == "settings"
                     and self.editing.key == f["key"]):
@@ -1159,8 +1133,15 @@ class CourserApp(App):
                                    width=16, prefix=f"{cur} "))
                 continue
             if f["kind"] == "action":
-                # 动作行：发送一封测试邮件（第一次回车请求执行，第二次回车确认发送）
-                if self.sv.test_mail_armed_at is not None:
+                # 动作行：发送一封测试邮件（第一次回车请求执行，第二次回车确认发送）。
+                # 发送在后台线程进行，UI 立即切到「发送中…」，不阻塞主线程。
+                if self.sv.test_mail_sending:
+                    value = ui_warn("发送中…")
+                elif self.sv.test_mail_result is True:
+                    value = ui_ok("发送成功")
+                elif self.sv.test_mail_result is False:
+                    value = ui_error("发送失败")
+                elif self.sv.test_mail_armed_at is not None:
                     value = ui_warn("再次回车确认发送")
                 elif notifier.gws_available():
                     value = ui_meta("回车发送")
@@ -1178,10 +1159,36 @@ class CourserApp(App):
                 value = ui_value(val)
             out.append(_kv_row(f["label"], value, width=16,
                                prefix=f"{cur} "))
-        # 底部操作提示：确认提示已由动作行承担，这里保持正常页面操作不变。
-        out.extend(["", _page_hint(
-            "↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃")])
+        # 底部操作提示由全局 #keys 固定展示（见 _settings_hint），不再写在正文里。
+        self.sv.row_y = row_y
         self.query_one("#settings_list", Static).update("\n".join(out))
+        self._scroll_settings_to_selection()
+        try:
+            self.query_one("#keys", Static).update(self._settings_hint())
+        except Exception:
+            pass
+
+    def _settings_hint(self) -> str:
+        """设置页底部操作栏：只显示当前选中行真正可用的操作。
+        字段编辑态切到编辑键位；←→ 切换仅在 enum 行可用，其它行（文本/动作）不提示。"""
+        if self.editing.context == "settings":
+            return self._EDIT_HINT
+        parts: list[tuple[str, str]] = [("↑↓", "选择")]
+        _g, f = self.s_rows[self.sv.index]
+        if f["kind"] == "enum":
+            parts.append(("←→", "切换"))
+        parts += [("Enter", "编辑/执行"), ("Ctrl+S", "保存"), ("Esc", "放弃")]
+        return _hint(*parts)
+
+    def _scroll_settings_to_selection(self) -> None:
+        """把设置页可滚动正文滚到选中行可见：↑↓ 仍由 App 移动 sv.index，
+        settingsscroll 只负责 clipping + 跟随，避免「↑↓ 有时移动字段、有时滚页面」。"""
+        try:
+            scroll = self.query_one("#settingsscroll", FocusScroll)
+            scroll.scroll_to(y=max(0, self.sv.row_y.get(self.sv.index, 0)),
+                             animate=False)
+        except Exception:
+            pass
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
     _EDIT_HINT = _hint(
@@ -1205,11 +1212,10 @@ class CourserApp(App):
             self._render_setup()
 
     def _edit_key(self, event: events.Key) -> None:
-        """编辑态按键统一走 FieldEditor；commit/cancel 才由调用方落盘。"""
-        if self.editing.context == "search" and event.key == "tab":
-            event.stop()
-            self._search_cycle_col(1)
-            return
+        """编辑态按键统一走 FieldEditor；commit/cancel 才由调用方落盘。
+
+        搜索态在 on_key 已拦截 Esc/↑↓/[/]/Tab/Enter，这里只做纯文本编辑
+        （←→ 移光标、字符/退格即改）；每次变化即时同步到 main.search_query。"""
         out = self.editor.feed(event.key,
                                getattr(event, "char", None),
                                bool(getattr(event, "is_printable", False)))
@@ -1217,8 +1223,6 @@ class CourserApp(App):
         if out == "commit":
             val = self.editor.text
             context, key = self.editing.context, self.editing.key
-            if context == "search":
-                self.main.search_query = val
             self._clear_editing()
             if context == "settings" and key:
                 self.sd[key] = val
@@ -1227,15 +1231,11 @@ class CourserApp(App):
                 self.log_line("收件邮箱已更新")
             self._render_field_page()
         elif out == "cancel":
-            # 查找编辑取消：放弃本次 draft，恢复已生效查找词（编辑态 Esc 已由 on_key 拦截，
-            # 这里兜底走同一取消语义：回浏览或回主页）。
-            context = self.editing.context
-            if context == "search":
-                self._cancel_search_edit()
-            else:
-                self._clear_editing()
-                self._render_field_page()
+            self._clear_editing()
+            self._render_field_page()
         else:
+            if self.editing.context == "search":
+                self.main.search_query = self.editor.text
             self._render_field_page()   # 移动光标 / 删除 / 插入后刷新（查找=输入即筛）
 
     def _settings_edit(self, f: dict) -> None:
@@ -1283,6 +1283,7 @@ class CourserApp(App):
     def _leave_settings(self, commit: bool) -> None:
         self._clear_editing()
         self.sv.test_mail_armed_at = None   # 离开设置页 = 放弃/结束确认窗口
+        self.sv.test_mail_result = None     # 清掉测试发送结果（后台发送是否仍在跑由 worker 自主收尾）
         if not commit:
             self.log_line("已放弃设置修改")
         self._show("main", force=True)
@@ -1294,8 +1295,7 @@ class CourserApp(App):
         body = self.query_one("#logbody", Static)
         lines = [ui_title("运行日志"), ""]
         if not self.log_buf:
-            lines.extend([ui_meta("暂无日志；开始监控或抓取后这里会记录每一轮过程"), "",
-                          _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回")])
+            lines.extend([ui_meta("暂无日志；开始监控或抓取后这里会记录每一轮过程"), ""])
             body.update("\n".join(lines))
             return
         for raw in self.log_buf[-300:]:
@@ -1311,7 +1311,6 @@ class CourserApp(App):
             else:
                 styled = ui_value(message)
             lines.append((f"{ui_meta(timestamp)}  " if timestamp else "") + styled)
-        lines.extend(["", _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回")])
         body.update("\n".join(lines))
 
     def _render_help(self) -> None:
@@ -1502,19 +1501,33 @@ class CourserApp(App):
     # ------------------------------------------------------------------
     def on_key(self, event: events.Key) -> None:
         key = event.key
-        # 查找编辑态：Esc 取消本次修改（来自浏览态则回浏览）；↑↓/PgUp/PgDn 浏览结果；
-        # ←/→/Tab/Enter/字符 交给 FieldEditor（←→ 移动输入光标，Tab 换列，Enter 确认）。
-        if self.editing.context == "search":
+        # 查找态（持续 live filter）：Esc 退出搜索；↑↓/PgUp/PgDn 浏览结果；
+        # [/] 跳课程页；Tab 换列；Enter 打开当前课程详情；其余交给 FieldEditor
+        # （←→ 移光标，字符/退格即改即筛）。仅主页生效——搜索草稿在详情页残留时
+        # 按键交给页面级处理（Esc 返回搜索页，而不是退出搜索）。
+        if self.editing.context == "search" and self.page == "main":
             if key == "escape":
                 event.stop()
-                self._cancel_search_edit()
+                self._leave_search()
             elif key in ("up", "down", "pageup", "pagedown"):
                 event.stop()
                 self._handle_cursor_nav(key)
+            elif key in ("[", "left_square_bracket"):
+                event.stop()
+                self._move_page_cursor(-1)
+            elif key in ("]", "right_square_bracket"):
+                event.stop()
+                self._move_page_cursor(1)
+            elif key == "tab":
+                event.stop()
+                self._search_cycle_col(1)
+            elif key == "enter":
+                event.stop()
+                self._open_detail()
             else:
                 self._edit_key(event)
             return
-        if self.editing.context:
+        if self.editing.context and self.editing.context != "search":
             # 任何行内编辑（settings / setup）统一走 FieldEditor
             self._edit_key(event)
             return
@@ -1672,9 +1685,12 @@ class CourserApp(App):
         elif k in ("pageup", "pagedown"):
             event.stop()
             self._handle_cursor_nav(k)
-        elif k in ("left", "right"):
+        elif k in ("[", "left_square_bracket"):
             event.stop()
-            self._move_page_cursor(-1 if k == "left" else 1)
+            self._move_page_cursor(-1)
+        elif k in ("]", "right_square_bracket"):
+            event.stop()
+            self._move_page_cursor(1)
         elif k == "enter":
             event.stop()
             self._open_detail()
@@ -1789,14 +1805,24 @@ class CourserApp(App):
             self._leave_settings(commit=False)
 
     def _test_mail_enter(self) -> None:
-        """发送测试邮件：首次回车进入二次确认（动作行转为
-        「再次回车确认发送」），2 秒内再按一次才真正发送；超时自动取消。"""
+        """发送测试邮件：首次回车进入二次确认（动作行转为「再次回车确认发送」），
+        第二次回车进入**后台异步发送**——先立即显示「发送中…」，绝不阻塞 UI 线程；
+        完成后显示成功/失败，2 秒后自动恢复。"""
+        if self.sv.test_mail_sending:
+            return   # 已在发送中，忽略再次回车
+
         if self.sv.test_mail_armed_at is not None:
-            # 确认窗口内的第二次回车 → 真正发送
+            # 确认窗口内的第二次回车 → 后台发送
             self.sv.test_mail_armed_at = None
-            self._test_mail_draft()
-            self._render_settings_list()
+            self.sv.test_mail_sending = True
+            self.sv.test_mail_result = None
+            self._render_settings_list()      # 先重绘为「发送中…」，再启动后台线程
+            # 提前取不可变参数，避免后台线程与 UI 线程编辑中的 draft 竞态
+            to = self.sd.get("to", "").strip()
+            gws_from = self.sd.get("gws_from", "").strip()
+            self._send_test_mail_worker(to, gws_from)
             return
+
         self.sv.test_mail_armed_at = time.time()
         self.set_timer(2.0, self._expire_test_mail_confirm)
         self._render_settings_list()
@@ -1809,26 +1835,47 @@ class CourserApp(App):
             if self.page == "settings":
                 self._render_settings_list()
 
-    def _test_mail_draft(self) -> None:
-        # 只使用当前 draft，不落盘
-        to = self.sd.get("to", "").strip()
-        gws_from = self.sd.get("gws_from", "").strip()
+    def _send_test_mail_draft(self, to: str, gws_from: str) -> bool:
+        """后台线程内安全地真正发送测试邮件，返回成败。
+
+        只使用调用方传入的不可变 draft 参数，绝不读 self.sd，避免与 UI 线程
+        编辑中的 draft 竞态；日志经 _thread_log 回主线程，不在后台线程碰 UI。
+        """
         if not to:
-            self.log_line("✗ 收件邮箱为空，无法测试")
-            return
+            self._thread_log("✗ 收件邮箱为空，无法测试")
+            return False
         if not notifier.gws_available():
-            self.log_line("✗ gws 未安装，无法发送")
-            return
+            self._thread_log("✗ gws 未安装，无法发送")
+            return False
         n = self.cfg.notify
-        self.log_line("正在发送测试邮件…（使用当前改动，尚未保存）")
+        self._thread_log("正在发送测试邮件…（使用当前改动，尚未保存）")
         ok = notifier.send_email_with_retry(
             type(n)(to=to, gws_from=gws_from,
                     min_interval_min=n.min_interval_min,
                     max_per_hour=n.max_per_hour),
             "【courser】测试邮件",
             "courser 测试邮件：设置里的改动尚未保存，此测试不落盘。",
-            log=self.log_line)
-        self.log_line("测试邮件已发送" if ok else "✗ 测试邮件发送失败（已重试 3 次），请检查 gws / 网络")
+            log=self._thread_log)
+        self._thread_log("测试邮件已发送" if ok
+                         else "✗ 测试邮件发送失败（已重试 3 次），请检查 gws / 网络")
+        return ok
+
+    @work(thread=True, exclusive=True)
+    def _send_test_mail_worker(self, to: str, gws_from: str) -> None:
+        ok = self._send_test_mail_draft(to, gws_from)
+        self.call_from_thread(self._finish_test_mail, ok)
+
+    def _finish_test_mail(self, ok: bool) -> None:
+        self.sv.test_mail_sending = False
+        self.sv.test_mail_result = ok
+        if self.page == "settings":
+            self._render_settings_list()
+        self.set_timer(2.0, self._clear_test_mail_result)
+
+    def _clear_test_mail_result(self) -> None:
+        self.sv.test_mail_result = None
+        if self.page == "settings":
+            self._render_settings_list()
 
     # ------------------------------------------------------------------
     # 动作

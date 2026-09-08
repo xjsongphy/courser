@@ -21,9 +21,8 @@ class MainViewState:
     snapshot_meta: str = ""
     snapshot_risk: Optional[tuple] = None   # (risk_percent:int, risk_label:str)；None=未知
     search_col: Optional[str] = None   # 当前查找列（page/no/name/cat/…）；None = 未启用
-    search_query: str = ""             # 已生效的查找词（编辑中取 FieldEditor 缓冲）
-    search_edit_from_browse: bool = False  # 本次搜索编辑是否从『搜索浏览态』进入；
-                                        # 决定编辑态 Esc 是回浏览（True）还是回主页（False）
+    search_query: str = ""             # canonical 查找词：live filter 唯一查询来源，
+                                        # 编辑中输入即同步（见 _edit_key）
     result_sig: Optional[tuple] = None  # 最近一次可见结果集的身份签名（行身份序列）；
                                         # 仅当结果集本身变化时才把光标回到顶部（见 _render_course_window）
 
@@ -60,10 +59,13 @@ class FilterViewState:
 
 @dataclass
 class SettingsViewState:
-    """设置页：行索引（draft 事务）+ 测试邮件二次确认窗口。"""
+    """设置页：行索引（draft 事务）+ 测试邮件确认/发送状态。"""
 
     index: int = 0
     test_mail_armed_at: Optional[float] = None  # 确认窗口起点；None = 未在确认
+    test_mail_sending: bool = False             # 正在后台发送测试邮件（避免重入/不阻塞 UI）
+    test_mail_result: Optional[bool] = None     # 最近一次测试发送结果；None=未完成或已清除
+    row_y: dict[int, int] = field(default_factory=dict)  # 字段行 → 正文起始行号（自动滚动用）
 
 
 @dataclass
