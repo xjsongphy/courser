@@ -22,7 +22,7 @@ from email.message import EmailMessage
 from typing import Callable, Optional
 
 from .config import Notify
-from .course_table import course_display, ordered_courses, seats_display
+from .course_table import column, course_display, ordered_courses, seats_display
 
 _GWS = "gws"
 _AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
@@ -124,6 +124,7 @@ def _plain_body(courses: list, ts: str) -> str:
 
 def _html_body(courses: list, ts: str) -> str:
     esc = lambda s: html.escape(s or "", quote=True)
+    page_title = column("page").title
 
     def td(value: str, extra: str = "") -> str:
         return f"<td{extra}>{esc(value)}</td>"
@@ -152,7 +153,8 @@ def _html_body(courses: list, ts: str) -> str:
         "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\" "
         "style=\"border-collapse:collapse;border-color:#ccc;\">"
         "<thead><tr style=\"background:#eef2f8;\">"
-        "<th style=\"text-align:center;\">页</th><th>课程号</th><th>课程名</th>"
+        f"<th style=\"text-align:center;\">{esc(page_title)}</th>"
+        "<th>课程号</th><th>课程名</th>"
         "<th style=\"text-align:center;\">课程类别</th>"
         "<th>教师</th><th>班号</th><th>开课单位</th>"
         "<th>上课/考试信息</th>"
