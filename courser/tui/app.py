@@ -1229,9 +1229,13 @@ class CourserApp(App):
 
         搜索态在 on_key 已拦截 Esc/↑↓/[/]/Tab/Enter，这里只做纯文本编辑
         （←→ 移光标、字符/退格即改）；每次变化即时同步到 main.search_query。"""
+        # Textual exposes the actual typed character separately from the key
+        # name.  A symbol such as ``@`` may have a named key (``at``), so
+        # using only event.key silently drops it.
+        character = event.character
         out = self.editor.feed(event.key,
-                               getattr(event, "char", None),
-                               bool(getattr(event, "is_printable", False)))
+                               character,
+                               event.is_printable)
         event.stop()
         if out == "commit":
             val = self.editor.text
@@ -1624,12 +1628,10 @@ class CourserApp(App):
                 else:
                     self._leave_filters(commit=True)
         else:
-            # 其它可打印字符 → 输入即筛（含中文）。Textual 字母的 char 常为空，
-            # 需回退到单字符的 key（如 'a'），否则用 char。
-            char = getattr(event, "char", None)
-            key = getattr(event, "key", "")
-            text = char if char else (key if len(key) == 1 else None)
-            if text and getattr(event, "is_printable", False):
+            # 其它可打印字符 → 输入即筛（含中文）。Textual 的
+            # ``character`` 是实际输入字符，不能从命名键 ``key`` 反推符号。
+            text = event.character
+            if text and event.is_printable:
                 event.stop()
                 self._filters_type(text)
         # 其余按键在本页不生效，保持固定语义
