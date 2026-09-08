@@ -22,8 +22,10 @@ class MainViewState:
     snapshot_risk: Optional[tuple] = None   # (risk_percent:int, risk_label:str)；None=未知
     search_col: Optional[str] = None   # 当前查找列（page/no/name/cat/…）；None = 未启用
     search_query: str = ""             # 已生效的查找词（编辑中取 FieldEditor 缓冲）
-    filter_sig: Optional[tuple] = None  # 最近生效的结果集筛选签名 (view, search_col, query)；
-                                        # 签名变化时把光标回到顶部（见 _render_course_window）
+    search_edit_from_browse: bool = False  # 本次搜索编辑是否从『搜索浏览态』进入；
+                                        # 决定编辑态 Esc 是回浏览（True）还是回主页（False）
+    result_sig: Optional[tuple] = None  # 最近一次可见结果集的身份签名（行身份序列）；
+                                        # 仅当结果集本身变化时才把光标回到顶部（见 _render_course_window）
 
     def reset_cursor(self) -> None:
         self.index = 0

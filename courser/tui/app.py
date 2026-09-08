@@ -281,9 +281,15 @@ class CourserApp(App):
         return self.main.search_col or ""
 
     def _begin_search(self) -> None:
-        """启动查找：默认按课程名列，弹出输入框；输入即筛。"""
+        """启动查找：默认按课程名列，弹出输入框；输入即筛。
+
+        记录本次编辑是否来自『搜索浏览态』（已有已生效查找列）——
+        决定编辑态 Esc 是返回原搜索结果继续浏览，还是回普通主页。
+        """
+        self.main.search_edit_from_browse = self.main.search_col is not None
         if self.main.search_col is None:
             self.main.search_col = "name"
+        # 以已确认关键词为 draft 打开编辑器，caret 默认置于末尾 → 可继续增补
         self.editor.begin(self.main.search_query, "text")
         self.editing.context = "search"
         self.editing.key = "query"
@@ -312,8 +318,21 @@ class CourserApp(App):
         self.main.search_col = None
         self.main.search_query = ""
 
+    def _cancel_search_edit(self) -> None:
+        """放弃本次 draft（编辑态 Esc）。若来自搜索浏览态，恢复原已确认关键词继续浏览；
+        若从普通主页进入，则彻底退出搜索。main.search_query 从未被修改，
+        因此从浏览态进入时自然恢复原已确认关键词。"""
+        from_browse = self.main.search_edit_from_browse
+        self.main.search_edit_from_browse = False
+        self._clear_editing()
+        if not from_browse:
+            self._clear_search()
+        self.main.reset_cursor()
+        self._render_main(force=True)
+
     def _leave_search(self) -> None:
-        """一次 Esc 退出查找，包括正在编辑的输入态。"""
+        """彻底退出搜索，恢复普通主页（仅搜索浏览态按 Esc 触发）。"""
+        self.main.search_edit_from_browse = False
         self._clear_search()
         if self.editing.context == "search":
             self._clear_editing()
@@ -322,18 +341,28 @@ class CourserApp(App):
         self._render_main(force=True)
 
     def _main_hint(self) -> str:
-        """主页底部只显示当前状态下真正可用的操作。"""
+        """主页底部只显示当前状态下真正可用的操作；提示与搜索状态机一一对应。
+        宽屏用完整关键词，窄屏自动压缩（只是提示文字变短，按键能力不变）。"""
+        wide = self.size.width >= 115
         if self.editing.context == "search":
+            # 搜索编辑态：←→ 是移动输入光标（不是跳页）；Esc 取消本次修改。
+            if wide:
+                return _hint(
+                    ("←→", "移动输入光标"), ("↑↓ / PgUp / PgDn", "浏览结果"),
+                    ("Tab", "换列"), ("Enter", "确认"), ("Esc", "取消修改"))
             return _hint(
-                ("↑↓ / PgUp / PgDn", "浏览结果"), ("←→", "跳转页数"),
-                ("Tab", "换列"), ("Enter", "确认查找"), ("Esc", "退出查找"),
-            )
+                ("←→", "输入光标"), ("↑↓/PgUp/PgDn", "浏览"),
+                ("Tab", "换列"), ("Enter", "确认"), ("Esc", "取消"))
         if self.main.search_col:
+            # 搜索浏览态
+            if wide:
+                return _hint(
+                    ("↑↓ / PgUp / PgDn", "浏览结果"), ("←→", "跳转页数"),
+                    ("/", "编辑关键词"), ("Tab", "换列"),
+                    ("Enter", "查看详情"), ("Esc", "退出查找"))
             return _hint(
-                ("↑↓", "浏览结果"), ("←→", "跳转页数"),
-                ("Enter", "编辑查找"), ("Tab", "换列"),
-                ("Esc", "退出查找"),
-            )
+                ("↑↓/PgUp/PgDn", "浏览"), ("←→", "跳页"), ("/", "编辑"),
+                ("Tab", "换列"), ("Enter", "详情"), ("Esc", "退出"))
         # 基础操作：没有可展示的数据时，不提示需要数据才能用的操作（如查找/视图）
         parts: list[tuple[str, str]] = [("空格", "开始/停止"), ("r", "立即抓取")]
         if self.courses:
@@ -1198,9 +1227,14 @@ class CourserApp(App):
                 self.log_line("收件邮箱已更新")
             self._render_field_page()
         elif out == "cancel":
-            # 查找编辑取消：还原为已生效的查找词，不自动清除整条查找
-            self._clear_editing()
-            self._render_field_page()
+            # 查找编辑取消：放弃本次 draft，恢复已生效查找词（编辑态 Esc 已由 on_key 拦截，
+            # 这里兜底走同一取消语义：回浏览或回主页）。
+            context = self.editing.context
+            if context == "search":
+                self._cancel_search_edit()
+            else:
+                self._clear_editing()
+                self._render_field_page()
         else:
             self._render_field_page()   # 移动光标 / 删除 / 插入后刷新（查找=输入即筛）
 
@@ -1468,19 +1502,15 @@ class CourserApp(App):
     # ------------------------------------------------------------------
     def on_key(self, event: events.Key) -> None:
         key = event.key
-        # 查找编辑态：Esc 退出整个查找；↑↓/PgUp/PgDn 浏览结果列表；其余交给编辑器
+        # 查找编辑态：Esc 取消本次修改（来自浏览态则回浏览）；↑↓/PgUp/PgDn 浏览结果；
+        # ←/→/Tab/Enter/字符 交给 FieldEditor（←→ 移动输入光标，Tab 换列，Enter 确认）。
         if self.editing.context == "search":
             if key == "escape":
                 event.stop()
-                self._leave_search()
+                self._cancel_search_edit()
             elif key in ("up", "down", "pageup", "pagedown"):
                 event.stop()
                 self._handle_cursor_nav(key)
-            elif key in ("left", "right"):
-                # 查找编辑态下 ←/→ 也是按结果所在页跳转（与主页一致），
-                # 让用户不用先 Enter 提交就能顺手翻页浏览搜索结果。
-                event.stop()
-                self._move_page_cursor(-1 if key == "left" else 1)
             else:
                 self._edit_key(event)
             return
