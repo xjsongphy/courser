@@ -49,6 +49,7 @@ from ..course_table import COURSE_COLUMNS, course_display, seats_display
 from ..storage import SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
+from .terminal_state import disable_terminal_mouse
 try:  # pragma: no cover - 非 POSIX 平台回退到 Textual 默认驱动
     from .driver import PrimaryScreenDriver as _PrimaryScreenDriver
 except Exception:  # pragma: no cover
@@ -1887,8 +1888,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
-    # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持备用屏。
-    CourserApp(cfg).run(mouse=False)
+    # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持主缓冲区。
+    # 但 mouse=False 只让 Textual 不去“开启”mouse reporting，它同样不会替我们
+    # “关闭”（LinuxDriver 的 enable/disable 都以 self._mouse 为门禁）。因此若上一个
+    # 异常退出的 TUI 在同一终端里留下了 1000/1003/1015/1006 mouse mode，需要在这里
+    # 兜底复位；否则原生拖选被吞、Cmd+C 提示“没有在终端中选择要复制的内容”。
+    # 见 courser/tui/terminal_state.py 与 tests/tui/test_terminal_selection.py。
+    disable_terminal_mouse()
+    try:
+        CourserApp(cfg).run(mouse=False)
+    finally:
+        disable_terminal_mouse()
     return 0
 
 if __name__ == "__main__":

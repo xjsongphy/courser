@@ -6,7 +6,12 @@
 1. 应用不进备用屏：用 `PrimaryScreenDriver` 拦截 DECSET 1049，
    让界面留在终端主缓冲区（否则原生拖选对它无效）；
 2. 不开启周期重绘：状态栏只展示确定发生的时刻（绝对时间），
-   绝不 set_interval(1s) 每秒刷新（否则 terminal selection 会被下次刷新清掉）。
+   绝不 set_interval(1s) 每秒刷新（否则 terminal selection 会被下次刷新清掉）；
+3. mouse reporting 保持关闭：入口用 `run(mouse=False)`（Textual 不去开启）；
+   并在启动前 / 退出后主动复位历史遗留的 mouse mode
+   （terminal_state.disable_terminal_mouse）。Textual 的 LinuxDriver 只在
+   `self._mouse` 为真时才发送 enable/disable 序列，mouse=False 意味着它既不开启
+   也不会替我们清理上个崩溃 TUI 留下的 1000/1003/1015/1006——所以必须兜底。
 
 用法：uv run python tests/tui/test_terminal_selection.py
 """
@@ -77,6 +82,35 @@ def test_run_uses_mouse_false():
            / "courser" / "tui" / "app.py").read_text(encoding="utf-8")
     assert re.search(r"\.run\(\s*mouse=False\s*\)", src), \
         "入口应保持 run(mouse=False)"
+
+
+def test_mouse_reset_covers_all_textual_modes():
+    """复位序列必须覆盖 Textual LinuxDriver 会开启的全部 mouse mode。
+    LinuxDriver 开的是 1000h/1003h/1015h/1006h（源码），复位必须包含 1015。"""
+    from courser.tui.terminal_state import RESET_MOUSE, disable_terminal_mouse
+    for code in (1000, 1002, 1003, 1015, 1006):
+        assert f"\x1b[?{code}l" in RESET_MOUSE, f"复位序列缺少 ?{code}l"
+    for seq in RESET_MOUSE.split("\x1b")[1:]:
+        assert seq.endswith("l"), f"复位序列只能关闭（l），含 {seq!r}"
+    # 可注入 stream：写往自定义缓冲且不抛错
+    import io
+    buf = io.StringIO()
+    disable_terminal_mouse(stream=buf)
+    assert buf.getvalue() == RESET_MOUSE
+
+
+def test_run_wrapped_with_mouse_reset():
+    """main() 必须在 run 前复位 mouse，并用 finally 保证退出后也复位。"""
+    src = (Path(__file__).resolve().parents[2]
+           / "courser" / "tui" / "app.py").read_text(encoding="utf-8")
+    assert "disable_terminal_mouse()" in src
+    assert "import disable_terminal_mouse" in src or \
+        "from .terminal_state import disable_terminal_mouse" in src
+    # disable 必须在 .run(mouse=False) 之前出现（启动前清一次历史 mouse mode）
+    assert src.index("disable_terminal_mouse()") < src.index(".run(mouse=False)")
+    # 退出后也复位：try/finally 里必须有第二次 disable
+    assert src.count("disable_terminal_mouse()") >= 2
+    assert "finally:" in src
 
 
 async def _smoke() -> None:
