@@ -1,168 +1,87 @@
-<div align="center">
-
 # courser
 
-### PKU 补退选空余名额监控 TUI
+北大补退选课程名额监控工具。它在本机 Chrome 中登录选课系统，按设定间隔读取补退选列表；当符合条件的课程出现空余时，发一封邮件提醒。
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/xjsongphy/courser)
-[![Python](https://img.shields.io/badge/python-%E2%89%A5%203.12-blue.svg)](https://www.python.org/)
-[![Built with Textual](https://img.shields.io/badge/built%20with-Textual-green.svg)](https://github.com/Textualize/textual)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+它只做查询和提醒，不会替你选课，也不会处理验证码。
 
-</div>
+> 请只用于自己的账号，并遵守学校的相关规定。登录、查询和翻页之间会保留随机间隔；遇到风控提示或验证码时，程序会停止本轮，而不是继续尝试。
 
-基于 **opencli + gws** 的北大补退选空余名额监控工具。以人类节奏定期登录选课系统，解析 **限数/已选**；命中筛选（课程名 / 课程类别 / 开课院系）且有空余名额时，经 gws 发送提醒邮件。
+## Quick start
 
-> 仅供监控本人账号，节奏远低于人工正常操作频率，请遵守学校规定。
+需要：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Chrome，以及两个已完成配置的命令行工具：
 
-## 功能特性
-
-- **三维度多值筛选** — 课程名 / 课程类别 / 开课院系，多选并存，「任一 / 全部」命中可切换；**课程类别只从自动探测的候选中选择**（候选取自抓取结果），不支持手输。一门课可同时属于多类（如「任选、思政选择性必修」会拆成 `任选` 和 `思政选择性必修` 两个独立候选项，选其中任一类都能命中该课）
-- **名额邮件提醒** — 限数 > 已选 → gws 发邮件（选课网表格样式），同课冷却去重
-- **每小时发送上限** — 1 小时内最多发 n 封（默认 5，设置可调）；只限发信、不影响查询轮次
-- **每轮重新登录** — 登出 → IAAA 登录 → 补退选，不长期挂会话
-- **动态页数解析** — 每轮读取分页器真实翻页，页数变化无需改配置
-- **人类节奏** — 操作随机间隔、轮询 ± 抖动；不输验证码，风控自动降速提示
-- **风控触发率显示** — 状态栏实时评估「请勿使用刷课机」警告的触发率（请求频率 + 页面警告语检测）；检测到警告语判 100% 并自动放慢节奏
-- **持久监控 TUI** — 主页 = 状态摘要 + 最近抓取课程；运行时状态统一收敛到页面底部**唯一的 activity 行**（`● 状态 … │ 下一轮 … │ 上一轮 … │ gmail`，抓取/监控等待/空闲互斥）；全中文，配色克制（默认正文 / bold 标题 / dim 次要 / cyan 交互与当前值 / green 成功 / yellow 警告 / red 失败），无主页输入框，纯键盘：
-  `空格 开始/停止 · r 立即抓取 · 1/2/3 视图(全部/符合筛选/只看空余) · / 按列查找 · ↑↓ 浏览 · 回车 详情 · f 筛选 · s 设置 · l 日志 · h 帮助 · q 退出`；鼠标拖拽选中文字与 Cmd+C 复制由终端处理
-- **主页按列查找** — `/` 在全部 / 符合筛选 / 只看空余三个视图都可用：弹出输入框，被查找列的列名在表头高亮；输入即筛（大小写不敏感的子串匹配），`Tab` 在可见列间切换查找列，`回车` 锁定查找词继续过滤，`Esc` 取消修改后再按一次清除整个查找
-- **课程信息完整** — 主页课程列表沿用「最近一次成功结果」的字段（页/课程号/课程名/课程类别/开课单位/教师/限选/空余/状态），按终端宽度自动增减列、只截断超长名称
-- **筛选 pi 式 selector** — 独立「筛选」页：顶部输入即可过滤（支持中文；↑↓ 选择、空格 选中/取消、有匹配回车选中、无匹配回车即作为自定义条目加入（课程类别维度除外——它只能从自动探测的候选中选择）；Tab 切维度）；空输入回车保存、Esc 放弃（未保存不落盘）。可选候选取自最近一次抓取，无结果时进入本页会自动先抓一轮
-- **设置 draft + 行内编辑 + 测试邮件二次确认** — 设置改动先进草稿：ctrl+s 保存、Esc 离开放弃（只用当前改动不落盘）；对文本/数字字段回车即在该行原位编辑（值保留，←/→ 移动光标、退格/Delete 删除、Home/End 到行首尾，回车确认、Esc 取消），枚举用 ←/→ 切换。邮件分组下有「发送一封测试邮件」动作行：回车进入确认（底部只提示「再次 Enter 确认发送」），2 秒内再按一次回车才真正发送（用当前 draft）；超时自动恢复原提示、不发送
-- **日志与运行时状态移出正文** — 完整运行日志放独立「日志」页（l）；主页正文不掺即时日志/进度，抓取、倒计时、上一轮结果统一在页面底部 activity 状态行；落盘 data/courser.log 不变
-- **首启就绪向导** — 首次启动整页引导，填写收件邮箱后「就绪→回车开始」，取代“按某个数=我已完成”；Esc 永不保存
-- **后台浏览器** — opencli 驱动真实 Chrome，弹出不抢焦点，可点开查看实时进度
-
-## 工作原理
-
-```
-TUI → Watcher 线程，每轮：
-  1. 登出旧会话（logout.do + iaaa logout.jsp）
-  2. 打开 IAAA 登录页
-     · 已配置学号/密码 → 填充后点登录
-     · 未配置 → 等待自动填充，直接点登录
-     · 遇验证码 → 放弃本轮并提示
-  3. 进入「补退选」，按分页器动态翻页，只读提取 课程/类别/开课单位/限数/已选
-  4. 筛选命中且 限数 > 已选 → 冷却去重后经 gws 发邮件
-```
-
-## 快速开始
-
-**前置依赖**（自行安装配置两个官方 CLI）：
-
-| 工具 | 用途 | 官方地址 | 配置 |
-|------|------|----------|------|
-| **opencli** | 驱动浏览器 | <https://github.com/jackwener/OpenCLI> | `npm i -g @jackwener/opencli` + Chrome 扩展 + daemon；`opencli doctor` 全绿 |
-| **gws** | 发送邮件 | <https://github.com/googleworkspace/cli> | `brew install gws` 或 `npm i -g @googleworkspace/cli`；`gws auth login` |
-
-其他：Python ≥ 3.12、[uv](https://docs.astral.sh/uv/)、Chrome 保存北大学号密码（或 TUI「设置」中配置）。
+- [OpenCLI](https://github.com/jackwener/OpenCLI)：连接本机 Chrome。安装扩展、启动 daemon 后，运行 `opencli doctor`，确认检查通过。
+- [Google Workspace CLI](https://github.com/googleworkspace/cli)（`gws`）：发送提醒邮件。安装后运行 `gws auth login` 授权 Gmail。
 
 ```bash
-git clone https://github.com/xjsongphy/courser && cd courser
+git clone https://github.com/xjsongphy/courser
+cd courser
 uv sync
 cp config.example.json config.json
-cp .env.example .env
-
-uv run courser        # 启动 TUI；首次启动弹配置向导
+uv run courser
 ```
 
-## 配置
+第一次启动会询问收件邮箱。其余设置可以在程序的设置页完成。
 
-`config.json`（gitignored，不入库；TUI「设置」是唯一修改入口）：
+若你更愿意由 Chrome 或密码管理器填充北大学号和密码，保持 `credentials` 为空即可；也可以写入 `config.json`，或通过环境变量 `PKU_USERNAME`、`PKU_PASSWORD` 提供。
 
-> 运行日志：每轮全量记录到 `data/courser.log`（gitignored，自动滚动），
-> 登录失败/发送失败/风控等现场都会写进去，排查问题先看它。
+## What it does
+
+- 每轮从 IAAA 登录，打开补退选页面，并按网站实际页数读取课程；不依赖固定页数。
+- 按课程名、课程类别和开课院系筛选。可选择任一条件命中或全部条件命中。
+- 只有“限数大于已选”的课程才会提醒；同一门课有冷却时间，邮件也有每小时上限。
+- 提供一个终端界面查看最近结果、调整筛选和设置、查看日志。文字选择和复制仍由终端本身处理。
+
+## Run one check
+
+```bash
+uv run courser --once
+```
+
+这会跑完一轮并把结果打印到终端，适合确认登录和筛选是否正常。持续运行则直接执行 `uv run courser`。
+
+## Configuration
+
+复制 `config.example.json` 得到 `config.json` 后，最常需要改的是下面几项：
 
 ```jsonc
 {
-  "first_run_done": false,          // 首次向导标记
-  "interval_min": 8.0,              // 轮询间隔（分钟），±40% 抖动
-  "interval_jitter": 0.4,
-  "page_delay_min": 6.0,            // 翻页随机间隔（秒）
-  "page_delay_max": 14.0,
-  "session": "courser-watch",
-  "window": "background",           // 后台窗口，弹出不抢焦点
-  "force_relogin": true,
-  "credentials": { "username": "", "password": "" },   // 留空=依赖自动填充
+  "interval_min": 8.0,       // 查询间隔（分钟）
   "filters": {
-    "names": [],
-    "categories": ["通识课(通选课III)", "通识课(通识核心课III)"],
+    "names": [],             // 课程名，支持子串匹配
+    "categories": [],        // 课程类别
     "depts": ["英语语言文学系"],
-    "match": "any"                  // any=任一命中 / all=全部命中
+    "match": "any"          // any：任一条件；all：全部条件
   },
   "notify": {
-    "to": "you@example.com",        // 收件邮箱
-    "gws_from": "",                 // gws 发件账号（可选）
-    "min_interval_min": 15.0        // 同课通知冷却（分钟）
-    "max_per_hour": 5               // 每小时最多发送封数（只限发信，不影响查询）
+    "to": "you@example.com",
+    "min_interval_min": 15.0,
+    "max_per_hour": 5
   }
 }
 ```
 
-## 常用命令
+`config.json` 不会提交到 Git。运行日志写在 `data/courser.log`；登录、浏览器连接或邮件发送出问题时，先看这里。
+
+## Troubleshooting
+
+`opencli doctor` 需要全部通过。若登录页填入账号密码后仍未跳转，先在同一个 Chrome 中手动完成一次登录，再执行 `uv run courser --once`。验证码和二次验证需要你本人处理，courser 不会代填。
+
+## Development
 
 ```bash
-uv run courser --once                      # 跑一轮并打印结果（可配 cron）
-uv run python scripts/test_mail.py         # 测试邮件
-uv run python scripts/test_pipeline.py      # 全链路测试（解析→判断→冷却→预算→发送）
-uv run python scripts/test_unit.py          # 单元测试（config/filters/risk/notifier/run_round）
-uv run python scripts/simulate_seats.py    # 模拟"有空余"触发提醒邮件
-uv run python scripts/smoke_tui.py         # TUI 无头冒烟
+uv run python tests/unit/test_opencli.py
+uv run python tests/integration/test_round_runner.py
+uv run python tests/tui/test_navigation.py
+uv run python tests/tui/test_responsive.py
 ```
 
-## 项目结构
-
-```
-courser/
-├── courser/            # 核心包
-│   ├── opencli.py      # opencli 子进程封装
-│   ├── logfile.py      # 持久化日志 data/courser.log（自动滚动）
-│   ├── human.py        # 人类节奏：随机间隔、抖动
-│   ├── fetch.py        # 登录 → 补退选 → 动态翻页只读抓取
-│   ├── filters.py      # 三维度多值筛选
-│   ├── notifier.py     # gws 邮件通知（去重/冷却在 watcher）
-│   ├── watcher.py      # 后台监控线程（每轮重新登录）
-│   ├── config.py       # config.json + .env
-│   └── tui.py          # 纯文本 TUI（主页 + 筛选/设置/日志/帮助/详情/首启）
-├── scripts/            # test_pipeline / test_unit / test_mail / simulate_seats / smoke_tui
-├── config.example.json
-├── .env.example
-└── pyproject.toml      # uv 管理（入口 courser.tui:main）
-```
-
-## 架构
-
-| 模块 | 职责 |
-|------|------|
-| `tui.py` | 持久监控 TUI：主页状态摘要 + 课程列表 + 底部单一 activity 状态行；筛选/设置/日志/帮助/详情/首启子页；Esc 永不保存 |
-| `watcher.py` | 按随机抖动间隔轮询；同课通知冷却去重 |
-| `fetch.py` | 登录 / 进入补退选 / `Page X of Y` 动态翻页，只读提取限数与已选 |
-| `opencli.py` | opencli CLI 通信层（eval / click / fill / open） |
-| `notifier.py` | 组装 RFC822 邮件 → `gws gmail users messages send` |
-| `config.py` | config.json + .env 加载 |
-| `human.py` | 随机延迟工具 |
-
-## 开发
+真实网站的端到端检查仍需手动执行：
 
 ```bash
-uv run python scripts/test_pipeline.py    # 全链路测试：解析→判断→冷却→预算→发送（mock gws）
-uv run python scripts/test_unit.py        # 单元测试：config/filters/risk/notifier/run_round
-uv run python scripts/smoke_tui.py        # TUI 无头冒烟：界面打开、快捷键、筛选/设置交互
-uv run courser --once                     # 端到端一轮（需已配置 opencli / gws / 登录凭据）
+uv run courser --once
 ```
-
-> 说明：浏览器侧的真实登录→翻页→抓取（`_EXTRACT_JS`/`login`/`walk_pages`）依赖
-> 真实的北大选课网会话，无法在沙箱里自动化回归，请用 `uv run courser --once` 做最终端到端确认。
-> 其余解析、判断、通知决策、邮件组装与发送（mock gws）均有上述测试覆盖。
-
-## 参考项目
-
-- [OpenCLI](https://github.com/jackwener/OpenCLI) — 浏览器驱动层
-- [googleworkspace/cli](https://github.com/googleworkspace/cli) — gws，Gmail API 发送
-- [Textual](https://github.com/Textualize/textual) / [rich](https://github.com/Textualize/rich) — TUI 与富文本
-- [codex](https://github.com/openai/codex) — TUI 配色 / 纯文本页面交互参考
 
 ## License
 
-MIT License，见 [LICENSE](LICENSE)。
+[MIT](LICENSE)
