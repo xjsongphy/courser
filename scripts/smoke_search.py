@@ -73,7 +73,7 @@ async def main():
         # 表头里被查找列的列名应高亮：_header_labels 对该列产出 [bold cyan]…[/]
         cols = app._columns(max(40, app.size.width - 4))
         hl = app._header_labels(cols)
-        assert "[bold cyan]" in hl and hl.count("[bold cyan]") == 1, \
+        assert "[bold #58A6FF]" in hl and hl.count("[bold #58A6FF]") == 1, \
             "查找列列名应恰有一个高亮"
 
         # 2) 输入即筛：输「数学」→ 只剩 高等数学
@@ -129,21 +129,22 @@ async def main():
         await pilot.press("1")
         await pilot.pause()
 
-        # 7) 空余视图 + 按「空余」列查找：先 tab 到 avail 再输数字
+        # 7) 空余视图 + 按「开课院系」列查找：tab 到 dept 再输入
         await pilot.press("3")
-        await pilot.pause()
+        await pilot.pause(0.1)
         await pilot.press("/")
-        await pilot.pause()
+        await pilot.pause(0.1)
         assert app.main.search_col == "name"
-        # name → cat → dept → teacher → seats → avail（5 次 tab）
-        for _ in range(5):
+        for _ in range(4):
+            if app.main.search_col == "dept":
+                break
             await pilot.press("tab")
-            await pilot.pause()
-        assert app.main.search_col == "avail", app.main.search_col
-        await pilot.press("4")
+            await pilot.pause(0.05)
+        assert app.main.search_col == "dept", app.main.search_col
+        await pilot.press("哲")
         await pilot.pause()
         rows = _visible(app)
-        assert len(rows) == 1 and rows[0].name == "中国哲学", rows
+        assert len(rows) == 1 and rows[0].name == "中国哲学", [r.name for r in rows]
         await pilot.press("escape", "escape")
         await pilot.pause()
         assert len(_visible(app)) == 2, "seats 视图未查找时应只有有空余的 2 门"

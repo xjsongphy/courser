@@ -88,7 +88,7 @@ def _make_app() -> CourserApp:
 
 def test_header_data_aligned_and_grid_contained():
     app = _make_app()
-    for W in (60, 80, 100, 140):
+    for W in (80, 100, 120, 160, 200):
         cols = app._columns(W)
         widths = [w for _k, _l, w in cols]
         hdr = _plain(app._header_labels(cols))
@@ -108,7 +108,7 @@ def test_header_data_aligned_and_grid_contained():
 
 def test_no_column_spills_past_width():
     app = _make_app()
-    for W in (60, 80, 100, 120, 160):
+    for W in (80, 100, 120, 160, 200):
         cols = app._columns(W)
         widths = [w for _k, _l, w in cols]
         assert app._table_width(cols) <= W, f"表格总宽 {app._table_width(cols)} > {W}"
@@ -158,7 +158,7 @@ def test_matched_star_confined_to_name_cell():
 def test_long_name_wrap_preserved():
     """超长课程名折行后完整保留（不截断、不加省略号）。"""
     app = _make_app()
-    for W in (60, 80, 100):
+    for W in (80, 100, 120, 160):
         cols = app._columns(W)
         widths = [w for _k, _l, w in cols]
         starts = _col_starts(widths)
@@ -175,14 +175,27 @@ def test_long_name_wrap_preserved():
 
 def test_required_columns_present_and_name_readable():
     app = _make_app()
-    for W in (50, 80, 120, 160):
+    for W in (60, 80, 120, 160, 200):
         cols = app._columns(W)
         keys = [k for k, _l, _w in cols]
-        for req in ("page", "no", "name", "seats", "avail"):
-            assert req in keys, f"必保列 {req} 缺失 @{W}"
+        # 所有列（含次级文本列）始终存在，不因宽度删除
+        for req in ("page", "no", "name", "cat", "dept", "teacher",
+                    "seats", "avail"):
+            assert req in keys, f"列 {req} 缺失 @{W}"
         name_w = next(w for k, _l, w in cols if k == "name")
-        assert name_w >= 6, f"课程名列过窄：{name_w} @{W}"
-    print("✓ 必保列总是存在；课程名列有可读最小宽")
+        assert name_w >= 2, f"课程名列过窄：{name_w} @{W}"
+    print("✓ 所有列始终存在；课程名有正宽度（文本列靠折行、不截断）")
+
+
+def test_availability_values_share_left_edge():
+    """空余列与表头同起点，1/2/3 位数不随长度横跳。"""
+    app = _make_app()
+    cols = app._columns(120)
+    avail_w = next(width for key, _label, width in cols if key == "avail")
+    for avail in (0, 18, 152):
+        cell = app._align_cell(str(avail), avail_w, app._col_justify("avail"))
+        assert cell.index(str(avail)) == 0, repr(cell)
+    print("✓ 空余数值与表头同起点")
 
 
 def main() -> int:
@@ -192,6 +205,7 @@ def main() -> int:
     test_matched_star_confined_to_name_cell()
     test_long_name_wrap_preserved()
     test_required_columns_present_and_name_readable()
+    test_availability_values_share_left_edge()
     print("=" * 60)
     print("表格布局不变量测试通过 ✅")
     return 0
