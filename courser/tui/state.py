@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -47,10 +47,11 @@ class ProgressState:
 
 @dataclass
 class FilterViewState:
-    """筛选页：维度、搜索串、光标、滚动顶行、是否自动抓取候选。"""
+    """筛选页：搜索框与候选列表共用一条纵向焦点链。"""
 
     dim: int = 0               # 索引进 GROUPS
     query: str = ""            # 顶部输入即筛
+    focus: Literal["search", "list"] = "search"
     index: int = 0
     top: int = 0
     auto_gather: bool = False  # 进筛选页不再自动抓取生成候选（用缓存/手动抓）

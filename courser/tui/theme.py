@@ -139,11 +139,19 @@ VerticalScroll:focus { border: none; }
 #coursehead { height: auto; margin: 0 0 1 0; }
 
 /* 次级页面：铺开成终端文本，不套 GUI 面板 */
-#page-filters, #page-logs, #page-help,
-#page-detail, #page-setup {
+#page-logs, #page-help, #page-detail, #page-setup {
     height: 1fr;
     padding: 1 2;
     border: none;
+}
+
+/* 筛选的候选列表与设置项相同：由真实 viewport 滚动，光标绝不越出页面。 */
+#page-filters {
+    height: 1fr;
+    min-height: 0;
+    padding: 1 2;
+    border: none;
+    overflow: hidden;
 }
 
 /* 设置页：正文进入可滚动 viewport（内容再长也不能把底部 #keys/#activity 挤出屏幕） */
@@ -155,7 +163,7 @@ VerticalScroll:focus { border: none; }
     overflow: hidden;
 }
 
-#logscroll, #helpscroll, #detscroll, #settingsscroll { height: 1fr; }
+#filtersscroll, #logscroll, #helpscroll, #detscroll, #settingsscroll { height: 1fr; }
 #filters_list, #settings_list, #setupbody { height: auto; }
 
 /* TUI 滚动条：1 格灰色 thumb，track 透明，不出现彩色 hover */

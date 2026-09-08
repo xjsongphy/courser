@@ -208,9 +208,35 @@ async def test_search_live_filter():
     print("✓ / 搜索=live filter：Enter 直接详情、Esc 退出；[/] 搜索也跳页；←→ 只移光标")
 
 
+def test_view_hierarchy() -> None:
+    """1 全部 ⊇ 2 符合筛选 ⊇ 3 有空余；空筛选时 2/3 自然退化。"""
+    cfg = Config()
+    app = CourserApp(cfg)
+    app.courses = [
+        Course(course_no="001", name="目标课", quota=10, selected=9, avail=1),
+        Course(course_no="002", name="其它课", quota=10, selected=9, avail=1),
+        Course(course_no="003", name="目标满额", quota=10, selected=10, avail=0),
+    ]
+
+    app.main.view = "matched"
+    assert len(app._visible_rows()) == 3, "空筛选时视图 2 应退化为全部"
+    app.main.view = "seats"
+    assert [c.name for c in app._visible_rows()] == ["目标课", "其它课"], \
+        "空筛选时视图 3 应显示所有有空余课程"
+
+    cfg.filters.names = ["目标"]
+    app.main.view = "matched"
+    assert [c.name for c in app._visible_rows()] == ["目标课", "目标满额"]
+    app.main.view = "seats"
+    assert [c.name for c in app._visible_rows()] == ["目标课"], \
+        "视图 3 必须继承筛选并再要求有空余"
+    print("✓ 视图层级：全部 ⊇ 符合筛选 ⊇ 有空余")
+
+
 async def main() -> int:
     await test_main_hint_states()
     await test_search_live_filter()
+    test_view_hierarchy()
     # ---- 首启设置：填邮箱 → 就绪 → 主页 ----
     cfg = Config.load()
     cfg.first_run_done = False
@@ -266,14 +292,20 @@ async def main() -> int:
         await p.pause(0.1)
         assert app.page == "main"
 
-        # 筛选（pi 式）：输入即筛 / Tab 维度 / 空格切换 / 回车保存
+        # 筛选：搜索框与候选列表是一条纵向焦点链，Space 语义由焦点决定。
         await p.press("f")
         await p.pause(0.2)
         assert app.page == "filters"
-        assert app.fv.dim == 0 and app.fv.query == ""
+        assert app.fv.dim == 0 and app.fv.query == "" and app.fv.focus == "search"
         await p.press("a")
         await p.pause(0.1)
         assert app.fv.query == "a", "输入应进入顶部搜索行"
+        await p.press("space")
+        await p.pause(0.1)
+        assert app.fv.query == "a ", "搜索框焦点下 Space 应输入空格"
+        await p.press("backspace")
+        await p.pause(0.1)
+        assert app.fv.query == "a"
         await p.press("backspace")
         await p.pause(0.1)
         assert app.fv.query == ""
@@ -282,9 +314,17 @@ async def main() -> int:
             "输入即筛应收窄列表"
         app.fv.query = ""
         app._render_filters_list()
+        await p.press("down")
+        await p.pause(0.1)
+        assert app.fv.focus == "list" and app.fv.index == 0, "↓ 应从搜索进入首个候选"
+        await p.press("up")
+        await p.pause(0.1)
+        assert app.fv.focus == "search", "列表首项 ↑ 应回到搜索框"
         await p.press("tab")
         await p.pause(0.1)
-        assert app.fv.dim == 1, "Tab 应切到课程类别"
+        assert app.fv.dim == 1 and app.fv.focus == "search", "Tab 应切维度并回到搜索"
+        await p.press("down")
+        await p.pause(0.1)
         await p.press("space")
         await p.pause(0.1)
         assert app.cfg.filters.categories == [], "空格应取消默认类别"
@@ -298,6 +338,8 @@ async def main() -> int:
         await p.press("f")
         await p.pause(0.2)
         await p.press("tab")
+        await p.pause(0.1)
+        await p.press("down")
         await p.pause(0.1)
         await p.press("space")
         await p.pause(0.1)
@@ -316,6 +358,8 @@ async def main() -> int:
         await p.pause(0.2)
         assert "物理学院课程" in app.cfg.filters.names, "无匹配回车应加入自定义条目"
         assert app.fv.query == "", "加入后应清空搜索"
+        await p.press("down")
+        await p.pause(0.1)
         await p.press("enter")
         await p.pause(0.2)
         assert app.page == "main"

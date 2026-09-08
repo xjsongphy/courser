@@ -254,9 +254,10 @@ class CourserApp(App):
         fs = FilterSet(self.cfg.filters)
         rows = self.courses
         if self.main.view == "matched":
-            rows = [c for c in rows if fs.matches(c)]
+            rows = rows if self.cfg.filters.empty else [c for c in rows if fs.matches(c)]
         elif self.main.view == "seats":
-            rows = [c for c in rows if c.has_seats]
+            rows = [c for c in rows if c.has_seats
+                    and (self.cfg.filters.empty or fs.matches(c))]
         if self.main.search_col:
             q = self.main.search_query.strip().lower()
             if q:
@@ -509,7 +510,8 @@ class CourserApp(App):
             with Vertical(id="page-filters"):
                 yield Static("", id="filters_hdr", markup=True)
                 yield Static("", id="fsearch", markup=True)
-                yield Static("", id="filters_list", markup=True)
+                with FocusScroll(id="filtersscroll"):
+                    yield Static("", id="filters_list", markup=True)
             # 设置（行内编辑，无独立输入框）
             with Vertical(id="page-settings"):
                 yield Static("", id="settings_hdr", markup=True)
@@ -556,7 +558,7 @@ class CourserApp(App):
     HINTS = {
         # 主页提示为动态（随是否有数据、查找态变化），见 _main_hint()；
         # 这里只保留二级页面与“查找态”之外的常量提示。
-        "filters": _page_hint("Tab 切换维度 · ↑↓ 移动 · 空格 选中 · 回车 保存 · Esc 放弃"),
+        "filters": _page_hint("搜索或选择筛选条件"),
         "settings": _page_hint("↑↓ 选择 · 回车 编辑/执行 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃"),
         "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回"),
         "help": _page_hint(),
@@ -602,6 +604,8 @@ class CourserApp(App):
             keys.update(self._main_hint())
         elif page == "settings":
             keys.update(self._settings_hint())
+        elif page == "filters":
+            keys.update(self._filters_hint())
         elif page in _KEYS_PAGES:
             keys.update(self.HINTS.get(page, ""))
         self.query_one("#activity", Static).display = page in _ACTIVITY_PAGES
@@ -648,7 +652,7 @@ class CourserApp(App):
         self._schedule_course_render()
 
     # -- Hero：产品身份 + 稳定摘要（Rich Panel + Table.grid）-------------
-    VIEWS = [("all", "1 全部"), ("matched", "2 符合筛选"), ("seats", "3 只看空余")]
+    VIEWS = [("all", "1 全部"), ("matched", "2 符合筛选"), ("seats", "3 有空余")]
 
     def _filter_summary(self) -> str:
         fs = self.cfg.filters
@@ -907,6 +911,7 @@ class CourserApp(App):
         self._f_backup = copy.deepcopy(self.cfg.filters)  # Esc 放弃依据
         self.fv.dim = 0
         self.fv.query = ""
+        self.fv.focus = "search"
         self.fv.index = 0
         self.fv.top = 0
         self._render_filters_list()
@@ -934,6 +939,7 @@ class CourserApp(App):
 
     def _filters_dim_cycle(self) -> None:
         self.fv.dim = (self.fv.dim + 1) % len(GROUPS)
+        self.fv.focus = "search"
         self.fv.index = 0
         self.fv.top = 0
         self._render_filters_list()
@@ -972,16 +978,22 @@ class CourserApp(App):
             ]))
         else:
             q = ui_value(self.fv.query)
+            search_marker = ui_key("❯") if self.fv.focus == "search" else " "
+            input_cursor = "[cyan]▍[/]" if self.fv.focus == "search" else ""
             fs.update("\n".join([
                 _kv_row("维度", ui_key(dim_name)),
                 _kv_row("组合", ui_value(mode)),
                 _kv_row("已选", ui_value(str(len(entries)))),
                 "",
-                f"{ui_key('搜索')}  {q}[cyan]▍[/]"
+                f"{search_marker} {ui_key('搜索')}  {q}{input_cursor}"
                 + (f"  {ui_meta('输入文字可过滤下方列表')}" if not self.fv.query else ""),
             ]))
         items = self._filters_items()
         listw = self.query_one("#filters_list", Static)
+        try:
+            self.query_one("#keys", Static).update(self._filters_hint())
+        except Exception:
+            pass
         if not items:
             if self.fv.gathering:
                 listw.update(ui_meta("正在抓取候选，列表待生成…"))
@@ -1008,19 +1020,51 @@ class CourserApp(App):
             self.fv.index = len(items) - 1
         if self.fv.index < self.fv.top:
             self.fv.top = self.fv.index
-        maxlines = max(3, min(20, self.size.height - 12))
-        if self.fv.index >= self.fv.top + maxlines:
-            self.fv.top = self.fv.index - maxlines + 1
-        window = items[self.fv.top:self.fv.top + maxlines]
         cands = set(self.candidate_lists[GROUPS[self.fv.dim][0]])
         out = []
-        for i, it in enumerate(window):
-            idx = self.fv.top + i
-            cur = "[cyan]❯[/]" if idx == self.fv.index else " "
+        for idx, it in enumerate(items):
+            cur = "[cyan]❯[/]" if (self.fv.focus == "list"
+                                     and idx == self.fv.index) else " "
             mark = "[cyan]✓[/]" if it in entries else " "
             extra = " [dim](手动添加)[/]" if it not in cands else ""
             out.append(f"{cur} {mark} {ui_value(it)}{extra}")
         listw.update("\n".join(out))
+        self.call_after_refresh(self._scroll_filters_to_selection)
+
+    def _filters_hint(self) -> str:
+        """只显示当前焦点真正可用的键，消除 Space 的二义性。"""
+        if self.fv.focus == "list":
+            return _hint(
+                ("↑↓", "移动"), ("Space", "选中/取消"),
+                ("Enter", "保存"), ("Tab", "切换维度"),
+                ("↑ 至顶部", "返回搜索"),
+            )
+        parts = [("文字 / Space", "搜索"), ("↓", "进入结果")]
+        if (self.fv.query and not self._filters_items()
+                and self._dim_custom_allowed()):
+            parts.append(("Enter", "添加当前条件"))
+        parts += [("Tab", "切换维度"), ("Esc", "清空/放弃")]
+        return _hint(*parts)
+
+    def _scroll_filters_to_selection(self) -> None:
+        """让筛选光标保持在真实 viewport 内，且只在越界时最小滚动。"""
+        if self.fv.focus != "list":
+            return
+        items = self._filters_items()
+        if not items:
+            return
+        try:
+            scroll = self.query_one("#filtersscroll", FocusScroll)
+            body = self.query_one("#filters_list", Static)
+        except Exception:
+            return
+        row = Region(
+            0,
+            body.virtual_region.y + self.fv.index,
+            scroll.scrollable_content_region.width,
+            1,
+        )
+        scroll.scroll_to_region(row, animate=False, force=True)
 
     def _filters_move(self, step: int) -> None:
         items = self._filters_items()
@@ -1578,23 +1622,36 @@ class CourserApp(App):
             self._main_key(k, event)
 
     def _filters_key(self, k: str, event: events.Key) -> None:
-        # pi 式：输入即筛、↑↓ 移动、空格/回车 选中；Tab 切维度
+        # 搜索框与候选是同一纵向焦点链：↓ 进入列表，列表首项 ↑ 返回搜索。
         if k == "tab":
             event.stop()
             self._filters_dim_cycle()
         elif k == "up":
             event.stop()
-            self._filters_move(-1)
+            if self.fv.focus == "list":
+                if self.fv.index == 0:
+                    self.fv.focus = "search"
+                    self._render_filters_list()
+                else:
+                    self._filters_move(-1)
         elif k == "down":
             event.stop()
-            self._filters_move(1)
+            if self.fv.focus == "search":
+                if self._filters_items():
+                    self.fv.focus = "list"
+                    self.fv.index = 0
+                    self._render_filters_list()
+            else:
+                self._filters_move(1)
         elif k == "backspace":
             event.stop()
-            self._filters_backspace()
+            if self.fv.focus == "search":
+                self._filters_backspace()
         elif k == "escape":
             event.stop()
             if self.fv.query:
                 self.fv.query = ""
+                self.fv.focus = "search"
                 self.fv.index = 0
                 self.fv.top = 0
                 self._render_filters_list()
@@ -1603,35 +1660,26 @@ class CourserApp(App):
         elif k in ("space", "enter"):
             event.stop()
             if k == "space":
-                if self.fv.query:
-                    # 允许多词搜索：输入态空格作为搜索内容
+                if self.fv.focus == "search":
+                    # 输入框获得焦点时，空格始终是查询内容。
                     self._filters_type(" ")
                 else:
                     self._filters_toggle()
-            else:  # enter
+            elif self.fv.focus == "list":
+                self._leave_filters(commit=True)
+            else:  # 搜索框 Enter 只负责无结果时添加自定义条件
                 items = self._filters_items()
-                if self.fv.query:
-                    if items and 0 <= self.fv.index < len(items):
-                        # 输入态回车：选中收窄后的当前项并清空输入，继续多选
-                        self._filters_toggle()
-                    elif self._dim_custom_allowed():
-                        # 无匹配候选：直接把输入当作自定义条目加入当前维度
-                        self._filters_add_custom(self.fv.query)
-                    else:
-                        # 课程类别不允许手动添加，仅可从自动探测的候选中选择
-                        self.log_line(
-                            f"课程类别不能手动添加，请从候选中选择：{self.fv.query}")
+                if self.fv.query and not items and self._dim_custom_allowed():
+                    self._filters_add_custom(self.fv.query)
                     self.fv.query = ""
                     self.fv.index = 0
                     self.fv.top = 0
                     self._render_filters_list()
-                else:
-                    self._leave_filters(commit=True)
         else:
             # 其它可打印字符 → 输入即筛（含中文）。Textual 的
             # ``character`` 是实际输入字符，不能从命名键 ``key`` 反推符号。
             text = event.character
-            if text and event.is_printable:
+            if text and event.is_printable and self.fv.focus == "search":
                 event.stop()
                 self._filters_type(text)
         # 其余按键在本页不生效，保持固定语义
