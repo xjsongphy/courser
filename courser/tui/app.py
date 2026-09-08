@@ -71,7 +71,7 @@ _field_value = field_value
 _field_mutate = field_mutate
 
 # 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
-_ACTIVITY_PAGES = {"main", "filters", "logs", "detail"}
+_ACTIVITY_PAGES = {"main", "filters", "settings", "logs", "detail"}
 
 def _compact_dt(dt: datetime) -> str:
     """把时间压成随年龄递减的紧凑格式：今天 HH:MM；昨天 "昨天 HH:MM"；
@@ -325,8 +325,8 @@ class CourserApp(App):
         """主页底部只显示当前状态下真正可用的操作。"""
         if self.editing.context == "search":
             return _hint(
-                ("↑↓ / PgUp / PgDn", "浏览结果"), ("Tab", "换列"),
-                ("Enter", "确认查找"), ("Esc", "退出查找"),
+                ("↑↓ / PgUp / PgDn", "浏览结果"), ("←→", "跳转页数"),
+                ("Tab", "换列"), ("Enter", "确认查找"), ("Esc", "退出查找"),
             )
         if self.main.search_col:
             return _hint(
@@ -793,12 +793,13 @@ class CourserApp(App):
 
     def _render_course_window(self, rows: list[Course]) -> None:
         body = self.query_one("#courselist", Static)
-        # 结果集变化 → 回到顶部第一条（fzf / lazygit 语义）。仅当「视图 / 查找列 /
-        # 查找词」三者构成的筛选签名改变时才复位 index/top=0；纯 ↑↓/翻页浏览不改
-        # 签名，不打断当前位置。空结果也在此复位，下次有结果时从顶部开始。
-        sig = (self.main.view, self.main.search_col, self._search_effective_query())
-        if sig != self.main.filter_sig:
-            self.main.filter_sig = sig
+        # fzf 式结果集语义：仅当「可见结果集本身」变化时才把光标回到顶部。
+        # 签名 = 结果行身份序列（seq/course_no/name）；两次查询得到完全相同的结果
+        # 集时（如「近代」→「近代物」）签名不变 → 留住光标，不打断位置。空结果也
+        # 在此复位，下次有结果时从顶部开始。
+        sig = tuple((c.seq, c.course_no, c.name) for c in rows)
+        if sig != self.main.result_sig:
+            self.main.result_sig = sig
             self.main.reset_cursor()
         if not rows:
             # 抓取已经开始后，进度区已经说明当前发生了什么；列表区保持安静。
@@ -1129,11 +1130,11 @@ class CourserApp(App):
                                    width=16, prefix=f"{cur} "))
                 continue
             if f["kind"] == "action":
-                # 动作行：发送一封测试邮件（回车进入二次确认）
+                # 动作行：发送一封测试邮件（第一次回车请求执行，第二次回车确认发送）
                 if self.sv.test_mail_armed_at is not None:
-                    value = ui_warn("确认中…请再次回车发送")
+                    value = ui_warn("再次回车确认发送")
                 elif notifier.gws_available():
-                    value = ui_meta("回车发送 · 再次回车确认")
+                    value = ui_meta("回车发送")
                 else:
                     value = ui_warn("gws 未安装，无法发送")
                 out.append(_kv_row(f["label"], value, width=18,
@@ -1148,12 +1149,9 @@ class CourserApp(App):
                 value = ui_value(val)
             out.append(_kv_row(f["label"], value, width=16,
                                prefix=f"{cur} "))
-        if self.sv.test_mail_armed_at is not None:
-            # 二次确认窗口：底栏只提示这一项
-            out.extend(["", _page_hint("再次 Enter 确认发送")])
-        else:
-            out.extend(["", _page_hint(
-                "↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃")])
+        # 底部操作提示：确认提示已由动作行承担，这里保持正常页面操作不变。
+        out.extend(["", _page_hint(
+            "↑↓ 选择 · 回车 编辑 · ←→ 切换 · Ctrl+S 保存 · Esc 放弃")])
         self.query_one("#settings_list", Static).update("\n".join(out))
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
@@ -1289,7 +1287,7 @@ class CourserApp(App):
                  _shortcut_row("1", "全部课程"),
                  _shortcut_row("2", "符合筛选"),
                  _shortcut_row("3", "有空余名额"),
-                 _shortcut_row("/", "按列查找（输入即筛，Tab 换列）"),
+                 _shortcut_row("/", "按列查找（输入即筛，Tab 换列，←→ 跳转结果页数）"),
                  _shortcut_row("Esc", "清除查找"),
                  _shortcut_row("↑ / ↓", "选择课程"),
                  _shortcut_row("Enter", "查看详情"), "",
@@ -1478,6 +1476,11 @@ class CourserApp(App):
             elif key in ("up", "down", "pageup", "pagedown"):
                 event.stop()
                 self._handle_cursor_nav(key)
+            elif key in ("left", "right"):
+                # 查找编辑态下 ←/→ 也是按结果所在页跳转（与主页一致），
+                # 让用户不用先 Enter 提交就能顺手翻页浏览搜索结果。
+                event.stop()
+                self._move_page_cursor(-1 if key == "left" else 1)
             else:
                 self._edit_key(event)
             return
@@ -1756,8 +1759,8 @@ class CourserApp(App):
             self._leave_settings(commit=False)
 
     def _test_mail_enter(self) -> None:
-        """发送测试邮件：首次回车进入二次确认（底栏只提示
-        「再次 Enter 确认发送」），2 秒内再按一次才真正发送；超时自动取消。"""
+        """发送测试邮件：首次回车进入二次确认（动作行转为
+        「再次回车确认发送」），2 秒内再按一次才真正发送；超时自动取消。"""
         if self.sv.test_mail_armed_at is not None:
             # 确认窗口内的第二次回车 → 真正发送
             self.sv.test_mail_armed_at = None
