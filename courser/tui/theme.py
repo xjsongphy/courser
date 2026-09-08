@@ -135,8 +135,8 @@ VerticalScroll:focus { border: none; }
 /* 主页 */
 #page-main { height: 1fr; min-height: 0; padding: 0 2; border: none;
              overflow: hidden; }
-#courselist { height: 1fr; min-height: 1; overflow: hidden; }
-#coursehead { height: auto; }
+#courselist { height: 1fr; min-height: 1; margin: 0 0 1 0; overflow: hidden; }
+#coursehead { height: auto; margin: 0 0 1 0; }
 
 /* 次级页面：铺开成终端文本，不套 GUI 面板 */
 #page-filters, #page-settings, #page-logs, #page-help,
@@ -165,9 +165,8 @@ FocusScroll {
 }
 
 #keys {
-    height: auto;
-    min-height: 1;
-    padding: 0 4 1 4;
+    height: 1;
+    padding: 0 4;
     overflow-x: hidden;
     overflow-y: hidden;
 }
