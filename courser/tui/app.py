@@ -5,8 +5,9 @@
 完成。页面用线条边框面板分区，配色克制（统一原语见 courser/tui/theme.py）。
 
 主页分三层，职责不重叠：顶部 Hero 稳定摘要（产品身份 + 筛选/通知/Gmail 最近
-发送/最近抓取/数据规模），中部课程列表，底部一行实时活动状态。不做每秒周期
-重绘（展示确定发生的绝对时刻），保证系统终端原生鼠标选择不被刷新打断。
+发送/最近抓取/数据规模），中部课程列表，底部一行实时活动状态。底部在抓取/监控
+进行中每秒刷新（已用秒数实走），空闲不重绘；用自调度 timer，绝不 set_interval，
+保证终端原生鼠标选择不被刷新打断。
 
 交互规范（一种操作一种入口，一个键一种语义）：
 - Enter = 进入 / 确认；Esc = 返回 / 放弃（**Esc 任何地方都不保存**）；
@@ -160,6 +161,7 @@ class CourserApp(App):
         self.editor = FieldEditor()
         self._detail_course: Optional[Course] = None
         self._f_backup = None
+        self._live_timer: Optional[object] = None   # 底部实时刷新的自调度 timer
         self._init_rows()
         self._load_snapshot()
 
@@ -1404,10 +1406,29 @@ class CourserApp(App):
 
     def _set_progress(self, done, total, op):
         self.prog.done, self.prog.total, self.prog.op = done, total, op
+        self._start_live_ticker()
         try:
             self._render_runstate()
         except Exception:
             pass
+
+    def _start_live_ticker(self) -> None:
+        """拉起底部实时刷新（自调度 set_timer）：只在抓取/监控进行中每秒重绘，
+        空闲即自动停止，避免无谓刷新干扰终端鼠标选区。"""
+        if self._live_timer is not None:
+            return
+        self._live_timer = self.set_timer(1.0, self._live_tick)
+
+    def _live_tick(self) -> None:
+        """1s 定时器：仍在抓取/监控中则刷新底部（时间实时走），空闲则不再续期。"""
+        self._live_timer = None
+        w = self.watcher
+        if w and (w.running or w.current_round_started_at is not None):
+            try:
+                self._render_runstate()
+            except Exception:
+                pass
+            self._live_timer = self.set_timer(1.0, self._live_tick)
 
     def _next_round_text(self, w) -> str:
         """下一轮倒计时（mm 分 ss 秒），随底部每秒刷新更新。"""
@@ -1418,19 +1439,13 @@ class CourserApp(App):
         return f"{m} 分 {s:02d} 秒"
 
     def _activity_fetching(self, w) -> str:
-        """抓取过程中（实时活动）：• 状态 抓取中 · 第 N/M 页 │ 已用 Xs │ 正在…。
-        只展示绝对时刻/进度这类确定事件，不设每秒周期重绘；进度由抓取线程的
-        on_progress 回调驱动。"""
+        """抓取过程中（实时活动）：• 状态 抓取中 · 正在… │ 已用 Ns（实时刷新）。
+        不显示步数/页数；已用秒数通过 _live_tick 每秒刷新。"""
         seg = [f"{ui_meta('• 状态')}  {ui_warn('抓取中')}"]
-        if self.prog.done is not None:
-            if self.prog.total:
-                seg.append(ui_value(f"第 {self.prog.done}/{self.prog.total} 页"))
-            else:
-                seg.append(ui_value(f"第 {self.prog.done} 步"))
-        elapsed = time.time() - w.current_round_started_at
-        seg.append(ui_meta(f"{elapsed:.0f}s"))
         if self.prog.op:
             seg.append(ui_value(str(self.prog.op)))
+        elapsed = time.time() - w.current_round_started_at
+        seg.append(ui_meta(f"已用 {elapsed:.0f}s"))
         return " │ ".join(seg)
 
     def _activity_steady(self, w) -> str:
@@ -1806,6 +1821,7 @@ class CourserApp(App):
             self.log_line("监控已停止")
         else:
             w.start()
+            self._start_live_ticker()   # 监控等待的下一轮倒计时也要实时刷新
             self.log_line(f"监控开始：每约 {self.cfg.interval_min} 分钟一轮（带抖动）")
 
     @work(thread=True, exclusive=True)
