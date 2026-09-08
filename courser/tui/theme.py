@@ -139,14 +139,23 @@ VerticalScroll:focus { border: none; }
 #coursehead { height: auto; margin: 0 0 1 0; }
 
 /* 次级页面：铺开成终端文本，不套 GUI 面板 */
-#page-filters, #page-settings, #page-logs, #page-help,
+#page-filters, #page-logs, #page-help,
 #page-detail, #page-setup {
     height: 1fr;
     padding: 1 2;
     border: none;
 }
 
-#logscroll, #helpscroll, #detscroll { height: 1fr; }
+/* 设置页：正文进入可滚动 viewport（内容再长也不能把底部 #keys/#activity 挤出屏幕） */
+#page-settings {
+    height: 1fr;
+    min-height: 0;
+    padding: 1 2;
+    border: none;
+    overflow: hidden;
+}
+
+#logscroll, #helpscroll, #detscroll, #settingsscroll { height: 1fr; }
 #filters_list, #settings_list, #setupbody { height: auto; }
 
 /* TUI 滚动条：1 格灰色 thumb，track 透明，不出现彩色 hover */
