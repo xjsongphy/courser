@@ -1,8 +1,9 @@
 """邮件通知：通过 gws（Google Workspace CLI）发送。
 
-gws = https://github.com/googleworkspace/cli（npm 包 @googleworkspace/cli，
-本机 brew 安装于 /opt/homebrew/bin/gws）。gws 需由用户自行安装并完成授权：
+gws = https://github.com/googleworkspace/cli（npm 包 @googleworkspace/cli）。
+安装并完成授权：
 
+    npm install -g @googleworkspace/cli
     gws auth login        # 浏览器完成 OAuth2 授权
 
 本模块组装 RFC822 邮件 → base64url → 调 Gmail API users.messages.send。
@@ -25,6 +26,7 @@ from .config import Notify
 from .course_table import column, course_display, ordered_courses, seats_display
 
 _GWS = "gws"
+GWS_INSTALL_COMMAND = "npm install -g @googleworkspace/cli"
 _AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
               "然后在 courser「设置」中填写 收件邮箱（gws 发件账号可选）。")
 

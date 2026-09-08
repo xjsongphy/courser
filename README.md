@@ -11,7 +11,8 @@
 需要：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Chrome，以及两个已完成配置的命令行工具：
 
 - [OpenCLI](https://github.com/jackwener/OpenCLI)：连接本机 Chrome。安装扩展、启动 daemon 后，运行 `opencli doctor`，确认检查通过。
-- [Google Workspace CLI](https://github.com/googleworkspace/cli)（`gws`）：发送提醒邮件。安装后运行 `gws auth login` 授权 Gmail。
+- [Google Workspace CLI](https://github.com/googleworkspace/cli)（`gws`）：发送提醒邮件。
+  安装：`npm install -g @googleworkspace/cli`，然后运行 `gws auth login` 授权 Gmail。
 
 ```bash
 git clone https://github.com/xjsongphy/courser

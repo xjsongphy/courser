@@ -1161,7 +1161,8 @@ class CourserApp(App):
                 if gname == MAIL_GROUP:
                     if not notifier.gws_available():
                         note_markup = ui_warn(
-                            "  ✗ 未找到 gws，请安装并执行 gws auth login")
+                            f"  ✗ 未找到 gws，请先执行 {notifier.GWS_INSTALL_COMMAND}，"
+                            "再执行 gws auth login")
                     else:
                         note_markup = ui_meta("  通过 gws 发送提醒")
                 elif _note:
@@ -1454,7 +1455,7 @@ class CourserApp(App):
         lines.append("  " + ("[green]✓[/] opencli 已安装"
                              if opencli else "[red]✗[/] opencli 未安装（请先安装并运行 opencli doctor）"))
         lines.append("  " + ("[green]✓[/] gws 已安装"
-                             if gws else "[red]✗[/] gws 未安装（brew install gws）"))
+                             if gws else f"[red]✗[/] gws 未安装（{notifier.GWS_INSTALL_COMMAND}）"))
         if gws:
             lines.append("  [yellow]⚠[/] gws 尚未授权——请先在命令行执行 gws auth login")
         lines.extend(["", ui_section("收件邮箱"), ui_meta("用于接收提醒，必填")])

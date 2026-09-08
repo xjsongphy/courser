@@ -65,6 +65,11 @@ def test_failure_branches():
     print("✓ notifier：to 为空 / gws 缺失 失败分支")
 
 
+def test_gws_install_hint():
+    assert notifier.GWS_INSTALL_COMMAND == "npm install -g @googleworkspace/cli"
+    assert "brew" not in notifier._AUTH_HINT.lower()
+
+
 def test_send_and_profile():
     _enable_fake_gws()
     _calls.clear()
