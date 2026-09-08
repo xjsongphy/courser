@@ -19,6 +19,7 @@ class MainViewState:
     top: int = 0               # 可视窗口顶行（在可见行中的下标）
     snapshot_ts: Optional[str] = None
     snapshot_meta: str = ""
+    snapshot_risk: Optional[tuple] = None   # (risk_percent:int, risk_label:str)；None=未知
     search_col: Optional[str] = None   # 当前查找列（page/no/name/cat/…）；None = 未启用
     search_query: str = ""             # 已生效的查找词（编辑中取 FieldEditor 缓冲）
     filter_sig: Optional[tuple] = None  # 最近生效的结果集筛选签名 (view, search_col, query)；

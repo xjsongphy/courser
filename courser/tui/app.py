@@ -182,6 +182,7 @@ class CourserApp(App):
         ts, meta = self.snapshot.meta()
         self.main.snapshot_ts = ts
         self.main.snapshot_meta = meta
+        self.main.snapshot_risk = self.snapshot.risk()
 
     # ------------------------------------------------------------------
     # 日志（环形缓冲；落盘由 scheduler/runner 负责）
@@ -708,6 +709,26 @@ class CourserApp(App):
             grid.add_row(label, value)
         return grid
 
+    def _risk_value_markup(self) -> str:
+        """风控一行：未知 → '—'；0%/低 绿 · 中 黄 · 高/极高/已触发 红。"""
+        risk = self.main.snapshot_risk
+        if not risk:
+            return ui_meta("—")
+        percent, label = risk
+        try:
+            percent = int(percent or 0)
+        except Exception:
+            percent = 0
+        if label == "无" or percent <= 0:
+            return f"[green]0%（无）[/]"
+        if label == "低":
+            color = "green"
+        elif label == "中":
+            color = "yellow"
+        else:
+            color = "red"
+        return f"[{color}]{percent}%（{label}）[/]"
+
     def _render_hero(self) -> None:
         t, meta = self._last_success()
         left_rows = [
@@ -718,6 +739,7 @@ class CourserApp(App):
         right_rows = [
             ("最近抓取", ui_value(t) if t else ui_meta("—")),
             ("数据", ui_value(meta) if meta else ui_meta("—")),
+            ("风控", self._risk_value_markup()),
         ]
         left = self._hero_kv_grid(left_rows)
         right = self._hero_kv_grid(right_rows)
@@ -1853,6 +1875,7 @@ class CourserApp(App):
             self.candidate_lists = self.snapshot.save(r)
             self.main.snapshot_ts = time.strftime("%Y-%m-%d %H:%M:%S")
             self.main.snapshot_meta = f"{r.pages} 页 · {len(r.courses)} 门课程"
+            self.main.snapshot_risk = (r.risk_percent, r.risk_label)
         if self.fv.gathering:
             self._on_gather_done()
         if self.page == "main":

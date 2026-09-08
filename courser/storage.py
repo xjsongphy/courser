@@ -85,6 +85,16 @@ class SnapshotStore:
         meta = f"{pages} 页 · {n} 门课程" if pages is not None else ""
         return ts, meta
 
+    def risk(self) -> Optional[tuple]:
+        """返回 (risk_percent, risk_label)；旧快照缺失风控信息 → None（未知）。"""
+        d = self.load()
+        if not d:
+            return None
+        p, lab = d.get("risk_percent"), d.get("risk_label")
+        if p is None:
+            return None
+        return int(p), str(lab or "无")
+
     def save(self, r: RoundResult, ts: Optional[str] = None) -> dict:
         """保存一轮结果并返回 distinct 候选。"""
         distinct = {
@@ -94,6 +104,7 @@ class SnapshotStore:
         }
         ts = ts or time.strftime("%Y-%m-%d %H:%M:%S")
         d = {"ts": ts, "pages": r.pages, "n": len(r.courses),
+             "risk_percent": r.risk_percent, "risk_label": r.risk_label,
              "distinct": distinct, "courses": [c.__dict__ for c in r.courses]}
         try:
             _atomic_write(self.path, d)
