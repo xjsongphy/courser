@@ -97,11 +97,11 @@ def _console_measure(renderable) -> int:
 
 # 单元格对齐：数字列右对齐、文本列左对齐（表头/数据共用）
 ALIGN = {
-    # 数值列（页数/限选已选/空余）一律右对齐，数字按个位对齐、不同位数不跳动；
-    # 文本/ID 列左对齐（课程类别也左对齐——居中会显得"漂"在中间）。
-    "page": "right", "no": "left", "name": "left",
-    "cat": "left", "dept": "left", "teacher": "left",
-    "seats": "right", "avail": "right",
+    # 只修「空余」列：数值右对齐，按个位对齐、不同位数不横跳。
+    # 其余列保持原样（页数/类别/限选已选居中，其余左对齐）。
+    "page": "center", "no": "left", "name": "left",
+    "cat": "center", "dept": "left", "teacher": "left",
+    "seats": "center", "avail": "right",
 }
 
 # 数值列绝不折行：页数/课程号/限选已选/空余 只占一个物理行

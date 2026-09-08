@@ -86,8 +86,8 @@ async def test_hero_layout() -> None:
 
 async def test_table_alignment_and_format() -> None:
     app = CourserApp(Config())   # 纯方法断言，不启动 run_test
-    assert app._col_justify("page") == "right"
-    assert app._col_justify("seats") == "right"
+    assert app._col_justify("page") == "center"
+    assert app._col_justify("seats") == "center"
     assert app._col_justify("avail") == "right"
     assert app._col_justify("no") == "left"
     assert app._col_justify("name") == "left"
