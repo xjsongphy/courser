@@ -6,10 +6,15 @@
 
 主页分三层，职责不重叠：顶部 Hero 稳定摘要（产品身份 + 筛选/通知/Gmail 最近
 发送/最近抓取/数据规模），中部课程列表，底部一行实时活动状态。底部在抓取/监控
-进行中每秒刷新（已用秒数实走），空闲不重绘；用自调度 timer，绝不 set_interval，
-保证终端原生鼠标选择不被刷新打断。
+进行中每秒刷新（已用秒数实走），空闲不重绘；用自调度 timer，绝不 set_interval。
+
+文本选择与复制完全交给 Textual 自己：`run(mouse=True)`，用户鼠标拖动即形成
+Textual 内置 selection，松手（TextSelected）自动把选中纯文本经 OSC 52 写入剪贴板
+并底部 toast 提示；同时恢复 Settings / Help / 日志 / 详情页的滚轮滚动。不再依赖
+终端原生 selection（见 tests/tui/test_text_selection.py）。
 
 交互规范（一种操作一种入口，一个键一种语义）：
+- 鼠标拖动 = 选择文字，松手 = 自动复制；滚轮 = 滚当前页 viewport（不改光标）；
 - Enter = 进入 / 确认；Esc = 返回 / 放弃（**Esc 任何地方都不保存**）；
 - ↑↓ = 移动，Space = 开始/停止或选中/取消（各页内遵循）；
 - 主页键：Space 开始/停止 · r 立即抓取 · / 按列查找 · f 筛选 · s 设置 ·
@@ -33,7 +38,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from textual import events, work
+from textual import on, events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -49,11 +54,6 @@ from ..course_table import COURSE_COLUMNS, course_display, seats_display
 from ..storage import SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
-from .terminal_state import disable_terminal_mouse
-try:  # pragma: no cover - 非 POSIX 平台回退到 Textual 默认驱动
-    from .driver import PrimaryScreenDriver as _PrimaryScreenDriver
-except Exception:  # pragma: no cover
-    _PrimaryScreenDriver = None
 from .theme import (ACCENT, COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
                     FocusScroll, FocusableStatic, _hint, _pad,
                     field_mutate, field_value, kv_row, page_hint, plain_markup,
@@ -142,13 +142,6 @@ class CourserApp(App):
     SUB_TITLE = "PKU 补退选空余名额监控"
     CSS = CSS
     BINDINGS = [Binding("ctrl+c", "quit", "退出", show=False, priority=True)]
-
-    def get_driver_class(self):
-        """让界面留在终端主缓冲区（不进备用屏），原生鼠标拖选 + Cmd+C 才能用。
-        （非 POSIX 平台回退到 Textual 默认驱动）"""
-        if _PrimaryScreenDriver is not None:
-            return _PrimaryScreenDriver
-        return super().get_driver_class()
 
     def __init__(self, cfg: Config):
         # 空白区域使用终端自身的默认背景/调色板，不铺 Textual 深色主题底。
@@ -1102,28 +1095,39 @@ class CourserApp(App):
 
     def _render_settings_list(self) -> None:
         hdr = self.query_one("#settings_hdr", Static)
-        gws_ok = notifier.gws_available()
-        gws = ui_ok("✓ 已安装") if gws_ok else ui_warn("✗ 未找到 gws")
         hdr.update(ui_title("设置"))
+        # 顶部不再重复展示「gws ✓ 已安装」——那是 Hero「通知」的职责。
+        # Settings 只在邮件分组里给出该环境异常时的局部诊断（正常不报喜）。
+        MAIL_GROUP = "邮件通知（gws 发送，需先 `gws auth login` 授权）"
         group_names = {
             "账号凭据（可选；留空则依赖浏览器密码管理器自动填充）":
                 ("账号", "可留空，登录时依赖浏览器密码管理器自动填充"),
-            "邮件通知（gws 发送，需先 `gws auth login` 授权）":
-                ("邮件", "通过 gws 发送提醒"),
+            MAIL_GROUP: ("邮件", "通过 gws 发送提醒"),
             "轮询节奏（自动带随机抖动）": ("轮询", "自动带随机抖动"),
             "行为": ("浏览器", "会话与窗口行为"),
         }
-        out = [f"{ui_label('gws')} {gws}\n"]
+        out: list[str] = []
         row_y: dict[int, int] = {}
         last = None
         for i, (gname, f) in enumerate(self.s_rows):
             if gname != last:
-                title, note = group_names.get(gname, (gname, ""))
+                title, _note = group_names.get(gname, (gname, ""))
+                # 邮件分组：正常只提示「通过 gws 发送提醒」；gws 缺失才用告警色诊断。
+                if gname == MAIL_GROUP:
+                    if not notifier.gws_available():
+                        note_markup = ui_warn(
+                            "  ✗ 未找到 gws，请安装并执行 gws auth login")
+                    else:
+                        note_markup = ui_meta("  通过 gws 发送提醒")
+                elif _note:
+                    note_markup = ui_meta(f"  {_note}")
+                else:
+                    note_markup = ""
                 if last is not None:
                     out.append("")
                 out.append(ui_section(title))
-                if note:
-                    out.append(ui_meta(f"  {note}"))
+                if note_markup:
+                    out.append(note_markup)
                 last = gname
             row_y[i] = len(out)   # 记录该字段行在正文中的起始行号（供自动滚动）
             cur = "[cyan]❯[/]" if i == self.sv.index else " "
@@ -1181,14 +1185,22 @@ class CourserApp(App):
         return _hint(*parts)
 
     def _scroll_settings_to_selection(self) -> None:
-        """把设置页可滚动正文滚到选中行可见：↑↓ 仍由 App 移动 sv.index，
-        settingsscroll 只负责 clipping + 跟随，避免「↑↓ 有时移动字段、有时滚页面」。"""
+        """↑↓ 移动设置项时保持选中行可见，但**不把滚动条钉到顶部**：
+        只要选中行还在当前可视区，就完全不动滚动位置；越界才以最小步长跟随。
+        这样滚轮滚动与光标移动彼此独立，光标在可视区内来回移动不会拖动整个列表。"""
         try:
             scroll = self.query_one("#settingsscroll", FocusScroll)
-            scroll.scroll_to(y=max(0, self.sv.row_y.get(self.sv.index, 0)),
-                             animate=False)
         except Exception:
-            pass
+            return
+        y = self.sv.row_y.get(self.sv.index, 0)
+        scroll_y = scroll.scroll_y or 0
+        view_h = max(1, int(scroll.size.height))
+        top, bottom = int(scroll_y), int(scroll_y) + view_h - 1
+        if top <= y <= bottom:
+            return  # 已在可视区：↑↓ 不动滚动条
+        # 越界才滚：向上到选中行 / 向下让它刚好进可视区底
+        target = y if y < top else max(0, y - view_h + 1)
+        scroll.scroll_to(y=target, animate=False)
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
     _EDIT_HINT = _hint(
@@ -1314,7 +1326,10 @@ class CourserApp(App):
         body.update("\n".join(lines))
 
     def _render_help(self) -> None:
-        lines = [ui_title("帮助"), "", ui_section("主页"),
+        lines = [ui_title("帮助"), "", ui_section("鼠标"),
+                 _shortcut_row("拖动", "选择文字，松手自动复制"),
+                 _shortcut_row("滚轮", "滚动页面（不改光标）"), "",
+                 ui_section("主页"),
                  _shortcut_row("Space", "开始 / 停止监控"),
                  _shortcut_row("r", "立即抓取一轮"),
                  _shortcut_row("1", "全部课程"),
@@ -1931,6 +1946,21 @@ class CourserApp(App):
         if self.watcher:
             self.watcher.stop()
 
+    @on(events.TextSelected)
+    def _auto_copy_selection(self, event: events.TextSelected) -> None:
+        """鼠标拖动选中文字、松手即自动复制：TextSelected 由 Textual 在 MouseUp
+        后发出，这里取出 `screen.get_selected_text()` 的纯文本，经 OSC 52 写入
+        剪贴板，并用不占布局的 toast 提示（不改变当前页面 / 光标 / 滚动状态）。
+        空 selection 直接忽略，不要求用户再按复制键。"""
+        text = self.screen.get_selected_text()
+        if not text:
+            return
+        self.copy_to_clipboard(text)
+        lines = text.count("\n") + 1
+        msg = (f"✓ 已复制 {lines} 行" if lines > 1
+               else f"✓ 已复制 {len(text)} 个字符")
+        self.notify(msg, title="", timeout=1.5)
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="courser",
                                  description="PKU 补退选空余名额监控（纯文本 TUI）")
@@ -1968,17 +1998,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
-    # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持主缓冲区。
-    # 但 mouse=False 只让 Textual 不去“开启”mouse reporting，它同样不会替我们
-    # “关闭”（LinuxDriver 的 enable/disable 都以 self._mouse 为门禁）。因此若上一个
-    # 异常退出的 TUI 在同一终端里留下了 1000/1003/1015/1006 mouse mode，需要在这里
-    # 兜底复位；否则原生拖选被吞、Cmd+C 提示“没有在终端中选择要复制的内容”。
-    # 见 courser/tui/terminal_state.py 与 tests/tui/test_terminal_selection.py。
-    disable_terminal_mouse()
-    try:
-        CourserApp(cfg).run(mouse=False)
-    finally:
-        disable_terminal_mouse()
+    # mouse=True：由 Courser/Textual 接管鼠标——拖动=选择，松手=自动复制（OSC52），
+    # 并恢复 Settings / Help / 日志 / 详情页的滚轮滚动。Textual 内部 selection 是
+    # 唯一复制路径，不再依赖终端原生 selection（见 tests/tui/test_text_selection.py）。
+    CourserApp(cfg).run(mouse=True)
     return 0
 
 if __name__ == "__main__":
