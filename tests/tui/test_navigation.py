@@ -33,23 +33,20 @@ def _assert_no_gui_widgets(app) -> None:
 
 
 async def test_main_hint_states():
-    """主页底栏：(1) 无数据不提示列查找；(2) 三个搜索状态提示与状态机一一对应；
-    宽/窄屏各自压缩文案、按键能力一致。"""
-    def states(app) -> tuple[str, str, str]:
+    """主页底栏：(1) 无数据不提示列查找；(2) 搜索=持续 live filter（无编辑/浏览区分）
+    ←→ 编辑关键词、[/] 跳页、Enter 详情、Esc 退出；宽窄屏各自压缩文案、
+    按键能力一致。"""
+    def states(app) -> tuple[str, str]:
         # 普通主页（有数据）
         app.main.search_col = None
         app.main.search_query = ""
-        app.main.search_edit_from_browse = False
         app.editing.context = None
         normal = app._main_hint()
-        # 搜索编辑态
+        # 搜索中（live filter：编辑态常开，Enter 直接详情）
         app.editing.context = "search"
-        editing = app._main_hint()
-        # 搜索浏览态
-        app.editing.context = None
         app.main.search_col = "name"
-        browsing = app._main_hint()
-        return normal, editing, browsing
+        searching = app._main_hint()
+        return normal, searching
 
     # 无数据：不提示「按列查找」（非挂载 app，宽度取 Textual 默认 → 窄屏）
     app0 = CourserApp(Config())
@@ -64,26 +61,22 @@ async def test_main_hint_states():
     wide.courses = _one()
     async with wide.run_test(size=(160, 40)):
         await asyncio.sleep(0.05)
-        normal, editing, browsing = states(wide)
+        normal, searching = states(wide)
         assert "按列查找" in normal
-        assert "移动输入光标" in editing and "取消修改" in editing
-        assert "跳转页数" not in editing, "编辑态 ←→ 是输入光标，不是跳页"
-        assert "编辑关键词" in browsing and "查看详情" in browsing
-        assert "跳转页数" in browsing and "退出查找" in browsing
+        assert "编辑关键词" in searching and "查看详情" in searching
+        assert "跳转页数" in searching and "退出查找" in searching
 
     # 窄屏：压缩文案，按键能力不变（不出现宽屏专属词）
     narrow = CourserApp(Config())
     narrow.courses = _one()
     async with narrow.run_test(size=(80, 24)):
         await asyncio.sleep(0.05)
-        normal, editing, browsing = states(narrow)
+        normal, searching = states(narrow)
         assert "按列查找" in normal
-        assert "输入光标" in editing and "取消" in editing
-        assert "跳转页数" not in editing
-        assert "编辑" in browsing and "详情" in browsing
-        assert "退出" in browsing
-        assert "移动输入光标" not in editing
-    print("✓ 主页提示：无数据隐藏按列查找；编辑/浏览态与状态机一一对应，宽窄屏各自压缩")
+        assert "编辑" in searching and "详情" in searching
+        assert "退出" in searching
+        assert "移动输入光标" not in searching and "取消修改" not in searching
+    print("✓ 主页提示：无数据隐藏按列查找；搜索=live filter 常开，宽窄屏各自压缩")
 
 
 def _fake(app) -> None:
@@ -119,12 +112,15 @@ async def _search_courses():
     return base
 
 
-async def test_search_full_state_machine():
-    """/ 搜索三态：编辑 → 浏览 → 再编辑 → 取消/退出。
+async def test_search_live_filter():
+    """/ 搜索 = 持续 live filter（删掉了编辑/浏览区分）。锁死核心规则：
 
-    锁死核心规则：/ 始终表示“编辑搜索”；Enter 从编辑进入浏览；编辑态 Esc 放弃
-    draft（从浏览进入则恢复原关键词继续浏览）；浏览态 Esc 才退出整个搜索；
-    左右键编辑时管输入光标、浏览时管课程页数。
+    · 一旦 / 进入，只要不按 Esc 就保持编辑态（editor 常开，光标常在）；
+    · ←→ 永远只是移动输入光标；↑↓/PgUp/PgDn 浏览结果；
+    · [/] 在搜索中也跳课程页（复用 _move_page_cursor）；
+    · Tab 换列、结果集变化回顶；
+    · Enter 直接打开当前选中课程详情（不清编辑态，返回后可继续）；
+    · Esc 在搜索列表退出整个搜索；在详情页则先返回搜索列表，再 Esc 才退出。
     """
     cfg = Config.load()
     cfg.first_run_done = True
@@ -136,101 +132,85 @@ async def test_search_full_state_machine():
         app._render_main(force=True)
         assert [k for k, _ in app._search_cols()] == ["no", "name", "cat", "dept"]
 
-        # ---- NORMAL → EDITING ----
+        # ---- NORMAL → SEARCH：editor 常开，caret 末尾 ----------------
         await p.press("/")
         await p.pause(0.05)
         assert app.editing.context == "search" and app.main.search_col == "name"
-        assert app.main.search_edit_from_browse is False, "从主页进入编辑"
-        assert app.editor.text == "" and app.editor.caret == 0
+        assert app.editor.active and app.editor.text == "" and app.editor.caret == 0
 
-        # 输入即筛："数学" → 高等数学/数学分析 ×2
+        # 输入即筛：canonical(query) 同步 → "数学" 收窄到 2 门
         app.editor.begin("数学", "text")
+        app.main.search_query = app.editor.text   # 真实输入经 _edit_key 同步；测试直接设等价态
         app._render_main(force=True)
         await p.pause(0.05)
-        assert app.editor.caret == 2 and app.editor.text == "数学"
+        assert app.main.search_query == "数学"
         rows = app._visible_rows()
         assert len(rows) == 2, f"输入即筛应收窄到 2，实得 {len(rows)}"
 
-        # 编辑态 ← 移动输入光标（不是跳页）
+        # ← 移动输入光标（不是跳页）；↑↓ 浏览结果
         await p.press("left")
         await p.pause(0.05)
-        assert app.editor.caret == 1, "编辑态 ← 应左移输入光标"
+        assert app.editor.caret == 1, "← 应左移输入光标"
         assert app.main.index == 0, "移动输入光标不应改变结果光标"
-
-        # 编辑态 ↑↓/PgUp/PgDn 浏览结果（输入光标不动）
         await p.press("down")
         await p.pause(0.05)
-        assert app.main.index == 1, "编辑态 ↓ 应浏览结果"
+        assert app.main.index == 1, "↓ 应浏览结果"
         assert app.editor.caret == 1, "浏览结果不应动输入光标"
 
         # Tab 换列：结果集变化 → 回顶
         await p.press("tab")
         await p.pause(0.05)
         assert app.main.search_col == "cat", "Tab 应切到下一搜索列"
-        assert app.editing.context == "search", "Tab 不退出编辑"
+        assert app.editing.context == "search", "Tab 不退出搜索"
         assert app.main.index == 0, "换列导致结果集变化应回顶"
         # 切回课程名列，便于后续断言
         app.main.search_col = "name"
         app._render_main(force=True)
         await p.pause(0.05)
 
-        # ---- EDITING → BROWSING（Enter 确认）----
-        await p.press("enter")
-        await p.pause(0.05)
-        assert app.editing.context is None, "Enter 应退出编辑进入浏览"
-        assert app.main.search_col == "name" and app.main.search_query == "数学"
-        assert not app.editor.active, "浏览态不应有活动输入框"
-
-        # ---- BROWSING → EDITING AGAIN（/ 重编辑，draft=已确认词，caret 末尾）----
-        await p.press("/")
-        await p.pause(0.05)
-        assert app.editing.context == "search"
-        assert app.main.search_edit_from_browse is True, "从浏览态进入编辑"
-        assert app.editor.text == "数学", "draft 应为已确认关键词"
-        assert app.editor.caret == 2, "重编辑 caret 应置于末尾"
-
-        # 修改关键词后 Esc → 放弃本次修改，恢复原已确认词继续浏览
-        app.editor.begin("物理", "text")
-        app._render_main(force=True)
-        await p.pause(0.05)
-        assert app.editor.text == "物理"
-        await p.press("escape")
-        await p.pause(0.05)
-        assert app.editing.context is None, "编辑态 Esc 应取消编辑"
-        assert app.main.search_col == "name", "Esc 不应退出整个搜索"
-        assert app.main.search_query == "数学", "应恢复原已确认关键词"
-        assert app.main.search_edit_from_browse is False
-
-        # ---- BROWSING 状态下 ←/→ 是跳课程页（空查词列出全部 8 门跨 1/2/3 页）----
-        await p.press("/")
-        await p.pause(0.05)
-        app.editor.begin("", "text")
-        await p.press("enter")
-        await p.pause(0.05)
-        assert app.editing.context is None and app.main.search_query == ""
-        rows_all = app._visible_rows()
-        assert len(rows_all) == 8, f"空查词应列出全部，实得 {len(rows_all)}"
-        assert not app.editor.active, "浏览态不应有活动输入框"
-        await p.press("right")
-        await p.pause(0.05)
-        assert app.main.index == next(i for i, c in enumerate(rows_all) if c.page == 2), \
-            "浏览态 → 应跳到下一页第一门课"
-        await p.press("left")
-        await p.pause(0.05)
-        assert app.main.index == next(i for i, c in enumerate(rows_all) if c.page == 1), \
-            "浏览态 ← 应回到上一页"
-
-        # ---- BROWSING → NORMAL（浏览态 Esc 彻底退出搜索）----
+        # ---- Esc 彻底退出搜索 ----------------------------------------
         await p.press("escape")
         await p.pause(0.05)
         assert app.main.search_col is None and app.main.search_query == ""
         assert app.editing.context is None
-    print("✓ / 搜索三态：编辑·浏览·再编辑·取消/退出；←→ 编辑=输入光标 浏览=翻课程页")
+
+        # ---- 空查词 + [/] 跳课程页（搜索中编辑态也跳页，不退出）--------
+        await p.press("/")
+        await p.pause(0.05)
+        assert app.editor.active
+        rows_all = app._visible_rows()
+        assert len(rows_all) == 8, f"空查词应列出全部，实得 {len(rows_all)}"
+        await p.press("]")
+        await p.pause(0.05)
+        assert app.main.index == next(i for i, c in enumerate(rows_all) if c.page == 2), \
+            "搜索中 ] 应跳到下一页第一门课"
+        assert app.editor.active, "跳页不应退出搜索/编辑"
+        await p.press("[")
+        await p.pause(0.05)
+        assert app.main.index == next(i for i, c in enumerate(rows_all) if c.page == 1), \
+            "搜索中 [ 应回到上一页"
+
+        # ---- Enter 打开详情；详情页 Esc 返回搜索，再 Esc 退出 ----------
+        assert app.editor.active, "此时仍在搜索态"
+        await p.press("enter")
+        await p.pause(0.1)
+        assert app.page == "detail", "搜索中 Enter 应打开选中课程详情"
+        assert app.editing.context == "search", "进详情不清搜索编辑态（返回可续）"
+        await p.press("escape")
+        await p.pause(0.1)
+        assert app.page == "main", "详情页 Esc 应返回搜索列表"
+        assert app.editing.context == "search" and app.main.search_col == "name", \
+            "返回后应还在搜索态"
+        await p.press("escape")
+        await p.pause(0.05)
+        assert app.main.search_col is None and app.editing.context is None, \
+            "搜索中 Esc 应彻底退出搜索"
+    print("✓ / 搜索=live filter：Enter 直接详情、Esc 退出；[/] 搜索也跳页；←→ 只移光标")
 
 
 async def main() -> int:
     await test_main_hint_states()
-    await test_search_full_state_machine()
+    await test_search_live_filter()
     # ---- 首启设置：填邮箱 → 就绪 → 主页 ----
     cfg = Config.load()
     cfg.first_run_done = False
@@ -359,6 +339,9 @@ async def main() -> int:
         await p.press("s")
         await p.pause(0.2)
         assert app.page == "settings"
+        # 设置页必须有固定 #keys 操作栏（正文滚动也不会把底部 footer 挤掉）
+        assert app.query_one("#keys").display, "设置页应显示固定 #keys 操作栏"
+        assert "↑↓" in str(app.query_one("#keys").render()), "设置页应显示页面级操作提示"
         for _ in range(2):
             await p.press("down")
         await p.pause(0.05)
@@ -368,6 +351,9 @@ async def main() -> int:
         await p.pause(0.1)
         assert app.editing.context == "settings" and app.editing.key == "to" \
             and app.editor.active, "回车应进入该行的行内编辑态"
+        # 字段编辑态下 #keys 应切到编辑键位提示
+        assert "移动光标" in str(app.query_one("#keys").render()), \
+            "编辑态底部应切到编辑键位提示"
         app.editor.begin("ab")
         app._render_settings_list()
         await p.press("left")
