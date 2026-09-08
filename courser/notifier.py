@@ -22,6 +22,7 @@ from email.message import EmailMessage
 from typing import Callable, Optional
 
 from .config import Notify
+from .course_table import course_display, seats_display
 
 _GWS = "gws"
 _AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
@@ -107,11 +108,11 @@ def _plain_body(courses: list, ts: str) -> str:
     lines = [f"补退选时空余名额提醒（{ts}）", "",
              "以下课程符合你的筛选条件，且当前有空余名额（按选课网顺序，从前往后）：", ""]
     for c in courses:
-        seats = f"{c.selected}/{c.quota}（空余 {c.avail}）" if c.quota is not None else c.seats_raw
+        seats = seats_display(c)
         page = f"（第 {c.page} 页）" if c.page else ""
         lines.append(f"• {c.name} [{c.course_no}] {page}")
         lines.append(f"    课程类别：{c.category}    开课单位：{c.dept}")
-        lines.append(f"    教师：{c.teacher}    限数/已选：{seats}")
+        lines.append(f"    教师：{c.teacher}    限/已选：{seats}    空余：{course_display(c, 'avail')}")
         if c.schedule:
             lines.append(f"    上课/考试信息：{c.schedule}")
         lines.append("")
@@ -129,20 +130,19 @@ def _html_body(courses: list, ts: str) -> str:
 
     rows = []
     for c in courses:
-        seats = f"{c.selected}/{c.quota}" if c.quota is not None else c.seats_raw
-        avail = str(c.avail) if c.avail >= 0 else "—"
-        page = str(c.page) if c.page else "—"
+        page = course_display(c, "page")
         rows.append("<tr>" + "".join([
             td(page, ' style="text-align:center;"'),
-            td(c.course_no),
-            td(c.name),
-            td(c.category, ' style="text-align:center;"'),
-            td(c.teacher),
-            td(c.class_no),
-            td(c.dept),
-            td(c.schedule, ' style="max-width:260px;word-break:break-all;"'),
-            td(seats, ' style="text-align:center;"'),
-            td(avail, ' style="color:#c0392b;font-weight:bold;text-align:center;"'),
+            td(course_display(c, "no")),
+            td(course_display(c, "name")),
+            td(course_display(c, "cat"), ' style="text-align:center;"'),
+            td(course_display(c, "teacher")),
+            td(course_display(c, "class_no")),
+            td(course_display(c, "dept")),
+            td(course_display(c, "schedule"), ' style="max-width:260px;word-break:break-all;"'),
+            td(course_display(c, "quota"), ' style="text-align:center;"'),
+            td(course_display(c, "selected"), ' style="text-align:center;"'),
+            td(course_display(c, "avail"), ' style="color:#c0392b;font-weight:bold;text-align:center;"'),
         ]) + "</tr>")
     return (
         "<html><body style=\"font-family:Helvetica,Arial,'PingFang SC','Microsoft YaHei',sans-serif;"
@@ -157,7 +157,7 @@ def _html_body(courses: list, ts: str) -> str:
         "<th style=\"text-align:center;\">课程类别</th>"
         "<th>教师</th><th>班号</th><th>开课单位</th>"
         "<th>上课/考试信息</th>"
-        "<th style=\"text-align:center;\">限数/已选</th><th>空余</th>"
+        "<th style=\"text-align:center;\">限选</th><th style=\"text-align:center;\">已选</th><th>空余</th>"
         "</tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"

@@ -180,7 +180,7 @@ def test_required_columns_present_and_name_readable():
         keys = [k for k, _l, _w in cols]
         # 所有列（含次级文本列）始终存在，不因宽度删除
         for req in ("page", "no", "name", "cat", "dept", "teacher",
-                    "seats", "avail"):
+                    "quota", "selected", "avail"):
             assert req in keys, f"列 {req} 缺失 @{W}"
         name_w = next(w for k, _l, w in cols if k == "name")
         assert name_w >= 2, f"课程名列过窄：{name_w} @{W}"

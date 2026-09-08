@@ -45,6 +45,7 @@ from ..editing import FieldEditor
 from ..filters import FilterSet
 from ..models import Course, RoundResult
 from ..scheduler import MonitorScheduler
+from ..course_table import COURSE_COLUMNS, course_display, seats_display
 from ..storage import SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
@@ -95,17 +96,23 @@ def _console_measure(renderable) -> int:
         return 0
 
 
-# 单元格对齐：数字列右对齐、文本列左对齐（表头/数据共用）
-ALIGN = {
-    # 只修「空余」列：数值右对齐，按个位对齐、不同位数不横跳。
-    # 其余列保持原样（页数/类别/限选已选居中，其余左对齐）。
-    "page": "center", "no": "left", "name": "left",
-    "cat": "center", "dept": "left", "teacher": "left",
-    "seats": "center", "avail": "right",
-}
+# 单元格对齐 / 是否折行：统一来自 canonical schema（courser/course_table.py），
+# 这里不再散落手写列定义，避免与邮件/其它渠道分裂。
+def _column_def(key: str):
+    from ..course_table import column
+    return column(key)
 
-# 数值列绝不折行：页数/课程号/限选已选/空余 只占一个物理行
-NO_WRAP_COLUMNS = {"page", "no", "seats", "avail"}
+
+def _col_justify_for(key: str) -> str:
+    col = _column_def(key)
+    return col.align if col else "left"
+
+
+def _col_no_wrap(key: str) -> bool:
+    """结构列（固定宽数值/ID）绝不折行；文本列可折行。"""
+    col = _column_def(key)
+    return bool(col and col.is_structural)
+
 
 # 顶部 hero 两栏布局：左右两栏之间的分隔区宽度（竖线 + 间距）。
 # 改这里必须同步更新 _render_hero 的自适应判定式（(inner - _HERO_SEP)//2）。
@@ -365,70 +372,51 @@ class CourserApp(App):
             return c.dept or ""
         if key == "teacher":
             return c.teacher or ""
-        if key == "seats":
-            return c.seats_raw or (f"{c.selected}/{c.quota}"
-                                   if c.quota is not None else "—")
+        if key == "quota":
+            return str(c.quota) if c.quota is not None else "—"
+        if key == "selected":
+            return str(c.selected) if c.selected is not None else "—"
         if key == "avail":
             return str(c.avail) if c.avail >= 0 else "—"
         return ""
 
-    # 结构列：永远存在，绝不折行/截断（数字右对齐，ID 左对齐）
-    _STRUCT_COLUMNS = [
-        ("page", "页数", 4),
-        ("no", "课程号", 10),
-        ("seats", "限选/已选", 9),
-        ("avail", "空余", 6),
-    ]
-    # 弹性文本列：永远存在，按 min + 权重 + preferred cap 给出目标列宽。
-    # 注意：实际显示里文本列由 Rich Table 用省略号截断（no_wrap + ellipsis），不折行。
-    _TEXT_COLUMNS = [
-        ("name", "课程名", 12, 3.0, 30),
-        ("cat", "课程类别", 8, 1.5, 20),
-        ("dept", "开课单位", 8, 1.5, 20),
-        ("teacher", "教师", 10, 2.0, 26),
-    ]
+    # 结构列/文本列：全部来自 canonical COURSE_COLUMNS，不手写第二份定义。
+    # 结构列（数值/ID）固定宽绝不折行；文本列按权重弹性分宽。
+    _STRUCT_COLUMNS = [c for c in COURSE_COLUMNS if c.is_structural]
+    _TEXT_COLUMNS = [c for c in COURSE_COLUMNS if not c.is_structural]
 
     def _columns(self, W: int) -> list[tuple[str, str, int]]:
         """按可用宽 W 计算每列目标宽：结构列固定，文本列分剩余宽度。
 
-        这是给布局/测试/列选择的“目标宽”；真正渲染时 _build_course_table
-        用 Rich Table，文本列按 ratio 自适应、超宽用省略号截断（不折行）。
-        这里保证 _table_width(cols) <= W。
+        列定义来自 canonical schema；这是 TUI 终端适配层的布局决定
+        （把文本列塞中间，数值列收尾），不另写第二份列定义。
         """
         structs = self._STRUCT_COLUMNS
         text = self._TEXT_COLUMNS
         GUT = 3
         ncols = len(structs) + len(text)
-        fixed = GUT + (ncols - 1) + sum(w for _k, _l, w in structs)
-        avail = W - fixed               # 分给四个文本列的总额
-        mins = sum(mn for _k, _l, mn, _w, _p in text)
-        tw = sum(wg for _k, _l, _m, wg, _p in text)
+        fixed = GUT + (ncols - 1) + sum(c.width for c in structs)
+        avail = W - fixed               # 分给文本列的总额
+        mins = sum(c.min_width for c in text)
+        tw = sum(c.weight for c in text)
         if avail < mins:
-            widths = [max(2, int(avail * wg / tw))
-                      for _k, _l, _m, wg, _p in text]
+            widths = [max(2, int(avail * c.weight / tw)) for c in text]
         else:
-            widths = [min(pf, mn + int((avail - mins) * wg / tw))
-                      for _k, _l, mn, wg, pf in text]
+            widths = [min(c.preferred, c.min_width + int((avail - mins) * c.weight / tw))
+                      for c in text]
         # 余量（含 cap 省下的）全部补回课程名，让表格正好填满 W
         widths[0] += avail - sum(widths)
         widths = [max(1, w) for w in widths]
-        return (structs[:2]
-                + [(k, l, widths[i]) for i, (k, l, _m, _w, _p) in enumerate(text)]
-                + structs[2:])
+        return ([(c.key, c.title, c.width) for c in structs[:2]]
+                + [(c.key, c.title, widths[i]) for i, c in enumerate(text)]
+                + [(c.key, c.title, c.width) for c in structs[2:]])
 
     def _table_width(self, cols) -> int:
         return 3 + sum(width for _key, _label, width in cols) + len(cols) - 1
 
     def _col_justify(self, key: str) -> str:
-        """数字列右对齐、文本列左对齐（统一来自模块级 ALIGN）。"""
-        return ALIGN.get(key, "left")
-
-    def _seat_display(self, c: Course) -> str:
-        """限选/已选：紧凑右对齐 `30/12`（限数/已选，与表头一致）；无配额则回退原始串。"""
-        if c.quota is not None and c.selected is not None:
-            return f"{c.quota}/{c.selected}"
-        raw = (c.seats_raw or "").replace(" ", "")
-        return raw or "—"
+        """对齐：统一来自 canonical schema COLUMN.align。"""
+        return _col_justify_for(key)
 
     def _header_labels(self, cols, indent: int = 0) -> str:
         cells = []
@@ -472,33 +460,17 @@ class CourserApp(App):
             return " " * padding + value
         return value + " " * padding
 
-    def _align_seats(self, value: str, width: int) -> str:
-        """限选/已选按 `/` 对齐：限数/已选各≤3 位时斜杠固定同列；
-        太长（超出 3 位）或非纯数字时退回居中。"""
-        if "/" in value:
-            num, den = value.split("/", 1)
-            if num.isdigit() and den.isdigit() and len(num) <= 3 and len(den) <= 3:
-                body = f"{num:>3}/{den:<3}".rstrip()
-                return " " * 2 + body
-        return self._align_cell(value, width, "center")
-
     def _course_lines(self, c: Course, matched: bool, cols,
                       cursor: bool, indent: int = 0) -> list[str]:
-        """渲染一门课程的物理行；折行时其它列保持垂直对齐。"""
-        values = {
-            "page": str(c.page) if c.page else "—",
-            "no": c.course_no or "—",
-            "name": c.name or "—",
-            "cat": c.category or "—",
-            "dept": c.dept or "—",
-            "teacher": c.teacher or "—",
-            "seats": self._seat_display(c),
-            "avail": "—" if c.avail < 0 else str(c.avail),
-        }
+        """渲染一门课程的物理行；折行时其它列保持垂直对齐。
+
+        单元格文本统一来自 canonical course_display，不手写格式化。
+        """
+        values = {key: course_display(c, key) for key, _l, _w in cols}
         wrapped: dict[str, list[str]] = {}
         for key, _label, width in cols:
-            if key in NO_WRAP_COLUMNS:
-                # 数值列绝不折行（页数/课程号/限选已选/空余），只占一个物理行
+            if _col_no_wrap(key):
+                # 结构列（数值/ID）绝不折行，只占一个物理行
                 wrapped[key] = [str(values[key])]
                 continue
             cell_width = width - 2 if key == "name" and matched else width
@@ -516,10 +488,7 @@ class CourserApp(App):
                     marker = ui_key("★" if line_no == 0 else " ")
                     cells.append(f"{marker} {ui_value(aligned)}")
                 else:
-                    if key == "seats":
-                        aligned = self._align_seats(text, width)
-                    else:
-                        aligned = self._align_cell(text, width, justify)
+                    aligned = self._align_cell(text, width, justify)
                     if key == "avail":
                         styled = ui_ok(aligned) if c.has_seats else ui_meta(aligned)
                     else:
@@ -921,23 +890,13 @@ class CourserApp(App):
             cells = [Text("❯", style=ACCENT)
                      if (self.main.top + i) == self.main.index else ""]
             for key, _l, _w in cols:
-                if key == "page":
-                    cells.append(Text(str(c.page) if c.page else "—"))
-                elif key == "no":
-                    cells.append(Text(c.course_no or "—"))
-                elif key == "name":
+                if key == "name":
                     cells.append(Text(("★ " if matched else "") + (c.name or "—")))
-                elif key == "cat":
-                    cells.append(Text(c.category or "—"))
-                elif key == "dept":
-                    cells.append(Text(c.dept or "—"))
-                elif key == "teacher":
-                    cells.append(Text(c.teacher or "—"))
-                elif key == "seats":
-                    cells.append(Text(self._seat_display(c)))
                 elif key == "avail":
-                    t = "—" if c.avail < 0 else str(c.avail)
-                    cells.append(Text(t, style="green" if c.has_seats else "dim"))
+                    cells.append(Text(course_display(c, key),
+                                      style="green" if c.has_seats else "dim"))
+                else:
+                    cells.append(Text(course_display(c, key)))
             table.add_row(*cells)
         return table
 
@@ -1924,7 +1883,8 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"命中 {len(r.matched)} | 其中空余 {len(seats)}")
         for c in r.matched:
             print(f"  - {c.name} [{c.course_no}] {c.category} {c.dept} "
-                  f"限选/已选 {c.seats_raw} 空余 {c.avail} 状态 {c.status or '—'}")
+                  f"限选/已选 {seats_display(c)} 空余 {course_display(c, 'avail')} "
+                  f"状态 {c.status or '—'}")
         return 0 if r.ok else 2
 
     # mouse=False：不请求鼠标报告；终端负责拖拽选择/Cmd+C，TUI 保持备用屏。

@@ -87,16 +87,17 @@ def test_build_body_columns():
 
     # 表格列与样式
     for col in ["页", "课程号", "课程名", "课程类别", "教师", "班号", "开课单位",
-                "上课/考试信息", "限数/已选", "空余"]:
+                "上课/考试信息", "限选", "已选", "空余"]:
         assert col in html_body, f"缺少列 {col}"
-    for banned in ["学分", "周学时", "年级", "选课状态", "自选P/NP", "状态"]:
+    for banned in ["学分", "周学时", "年级", "选课状态", "自选P/NP", "状态", "限数/已选"]:
         assert banned not in html_body, f"不应包含 {banned}"
-    assert html_body.count('style="text-align:center;"') == 9  # 页/类别/限数 各 th+td×2行
-    assert html_body.count("<th>") + html_body.count('<th style="text-align:center;">') == 10
-    # 单门课：不传 Order 的居中计数 3(th)+3(td)=6
+    # 居中：页/类别/限选/已选 各 th+td×2行 → header 4 + 2 行×4 = 12
+    assert html_body.count('style="text-align:center;"') == 12
+    assert html_body.count("<th>") + html_body.count('<th style="text-align:center;">') == 11
+    # 单门课：header 4 + 1 行×4 = 8
     _, single_html = notifier.build_body([_mk()], "ts")
-    assert single_html.count('style="text-align:center;"') == 6, single_html
-    print("✓ build_body：含页码、顺序保留、10 列、三类居中、无学分/年级/状态")
+    assert single_html.count('style="text-align:center;"') == 8, single_html
+    print("✓ build_body：含页码、顺序保留、11 列、四类居中、无学分/年级/状态")
 
 
 def _decode_mime(raw: str) -> str:

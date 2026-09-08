@@ -88,18 +88,35 @@ async def test_hero_layout() -> None:
 
 async def test_table_alignment_and_format() -> None:
     app = CourserApp(Config())   # 纯方法断言，不启动 run_test
-    assert app._col_justify("page") == "center"
-    assert app._col_justify("seats") == "center"
+    assert app._col_justify("page") == "right"
+    assert app._col_justify("quota") == "right"
+    assert app._col_justify("selected") == "right"
     assert app._col_justify("avail") == "right"
     assert app._col_justify("no") == "left"
     assert app._col_justify("name") == "left"
-    assert app._seat_display(COURSES[0]) == "30/12"
+    cols = app._columns(120)
+    keys = [k for k, _l, _w in cols]
+    assert "quota" in keys and "selected" in keys and "avail" in keys
+    assert "seats" not in keys, "限选/已选 合并列应拆开"
+
+
+async def test_risk_unknown_and_high():
+    """风控未知 → '—'；高/极高 → 红色标记（不崩溃）。"""
+    app = CourserApp(Config())
+    app.main.snapshot_risk = None
+    assert "—" in app._risk_value_markup()
+    app.main.snapshot_risk = (100, "极高")
+    m = app._risk_value_markup()
+    assert "100%" in m and "极高" in m and "red" in m
+    app.main.snapshot_risk = (0, "无")
+    assert "0%（无）" in app._risk_value_markup()
 
 
 async def main() -> int:
     await test_hero_layout()
     await test_table_alignment_and_format()
-    print("Hero / 表格对齐回归：两栏·窄屏单栏·筛选通知·最近抓取·数据·右对齐·30/12 ✅")
+    await test_risk_unknown_and_high()
+    print("Hero / 表格对齐回归：两栏·窄屏单栏·筛选通知·最近抓取·数据·风控·右对齐·拆分限选/已选 ✅")
     return 0
 
 

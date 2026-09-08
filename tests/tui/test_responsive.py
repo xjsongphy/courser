@@ -140,29 +140,28 @@ async def test_search_exit_does_not_shrink():
     print("✓ 退出查找后按箭头不再缩行（容量稳定）")
 
 
-def test_seats_compact_no_wrap():
-    """限/选 显示为紧凑 `150/150`，单一行不折行（数值列 no_wrap）。"""
+def test_seats_split_no_wrap():
+    """限选/已选 拆分两列：各自右对齐、单一行不折行（数值列 no_wrap）。"""
     import io as _io
     from rich.console import Console as _Console
     cfg = Config()
     app = CourserApp(cfg)
-    c = Course(quota=150, selected=150)
-    assert app._seat_display(c) == "150/150", app._seat_display(c)
     c2 = Course(course_no="X", name="n", category="c", dept="d",
                 quota=150, selected=150, avail=0)
     tbl = app._build_course_table([c2], app._columns(120))
     buf = _io.StringIO()
     _Console(force_terminal=False, color_system=None, width=120, file=buf).print(tbl, end="")
     out = buf.getvalue()
-    assert "150/150" in out, f"限/选 未在同一物理行出现：{out!r}"
-    assert "150 / 150" not in out, "限/选 不应带空格"
-    print("✓ 限/选 显示为紧凑 150/150，单一行不折行")
+    assert "150/150" not in out, "限/选 不应再合并成 150/150"
+    # 限选 与 已选 各自成列（两位 150 各占一列，重复出现两次表示两列都存在）
+    assert out.count("150") >= 2, f"限选/已选 应各自出现：{out!r}"
+    print("✓ 限/选 拆为独立列，各自右对齐、单一行不折行")
 
 
 async def main() -> int:
     await test_viewport_fill_and_arrow_stable()
     await test_search_exit_does_not_shrink()
-    test_seats_compact_no_wrap()
+    test_seats_split_no_wrap()
 
     for w, h in _GEOMETRIES:
         body, _, runstate_height, runstate_text, hero_text = await _render_at(w, h)
