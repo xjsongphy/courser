@@ -218,28 +218,36 @@ def _login_evidence(session: str) -> str:
 
 
 def _fill_value(session: str, selector: str, value: str) -> None:
-    """把 value 真正填进输入框并派发 input/change，让表单框架读得到。
+    """受控写入：原生 setter 设值并派发 input/change/blur，登录框架才认。
 
-    opencli 的 fill 只改 DOM value、不触发键盘/事件；IAAA 老登录框架若监听
-    input/change 事件读值，直接 fill 提交时会读到空值 → 停在登录页。
-    这里用原生 value setter + 派发 input/change 兜住这种情况。
+    opencli 的 fill 只改 DOM.value 不触发事件；IAAA 登录表单（#user_name oninput、
+    <form> onsubmit）监听事件读值，直接 fill 提交读到空值 → 停在登录页（实测）。
+    统一走 _set_input（原生 setter + 事件，React/受控通用），失败再退回 fill。
     """
-    oc.fill(session, selector, value)
-    sleep_rand(0.4, 0.8)
+    if not _set_input(session, selector, value):
+        oc.fill(session, selector, value)
+
+
+def _set_input(session: str, selector: str, value: str) -> bool:
+    """受控写入：用 HTMLInputElement 原生 setter 设值并派发 input/change/blur。
+
+    关键：登录表单是受控输入（#user_name 带 oninput、<form> 带 onsubmit）。
+    opencli 的 fill 只改 DOM.value 不触发事件 -> 框架内部状态没拿到值，
+    提交时校验认为空 -> 停在登录页、无错误文案（实测，日志 filled 有值却未跳转）。
+    这里用原生 setter + 派发事件，等于真实键入，对 React/受控 oninput 都生效。
+    """
+    js = (
+        f"((sel, v) => {{ const el = document.querySelector(sel); if (!el) return false; "
+        f"const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; "
+        f"setter.call(el, v); "
+        f"for (const t of ['input', 'change', 'blur']) "
+        f"el.dispatchEvent(new Event(t, {{ bubbles: true }})); "
+        f"return el.value === v; }})({json.dumps(selector)}, {json.dumps(value)})"
+    )
     try:
-        oc.eval_js(
-            session,
-            "(() => { const el = document.querySelector(" + json.dumps(selector) + ");"
-            " if (!el) return false;"
-            " const set = Object.getOwnPropertyDescriptor("
-            "   window.HTMLInputElement.prototype, 'value').set;"
-            " set.call(el, " + json.dumps(value) + ");"
-            " el.dispatchEvent(new Event('input', {bubbles:true}));"
-            " el.dispatchEvent(new Event('change', {bubbles:true}));"
-            " return true; })()",
-        )
+        return oc.eval_js(session, js) is True
     except Exception:
-        pass
+        return False
 
 
 def login(session: str, creds: Optional[dict] = None, window: Optional[str] = None,
