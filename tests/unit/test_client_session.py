@@ -95,6 +95,31 @@ def test_prepare_fetch_context_runs_workflow_steps_in_order():
     assert calls == ["login", "supplement", "first"]
 
 
+def test_prepare_fetch_context_logs_ready_state():
+    original_ensure = client.ensure_login
+    original_goto = client.goto_supplement
+    original_reset = client.reset_supplement_to_first_page
+    original_page = client._supplement_page_number
+    logs = []
+    try:
+        client.ensure_login = lambda *_args, **_kwargs: "reuse_session"
+        client.goto_supplement = lambda *_args, **_kwargs: "https://example.test/SupplyCancel.do"
+        client.reset_supplement_to_first_page = lambda *_args, **_kwargs: None
+        client._supplement_page_number = lambda *_args, **_kwargs: 1
+        client.prepare_fetch_context("test", log=logs.append)
+    finally:
+        client.ensure_login = original_ensure
+        client.goto_supplement = original_goto
+        client.reset_supplement_to_first_page = original_reset
+        client._supplement_page_number = original_page
+
+    assert logs == [
+        "抓取准备：登录状态=复用已有会话",
+        "抓取准备：补退选页面=https://example.test/SupplyCancel.do",
+        "抓取准备：当前页=1",
+    ]
+
+
 def test_reused_supplement_page_is_reset_before_walking():
     original_eval = client.oc.eval_js
     original_click = client.oc.click_by
@@ -123,6 +148,7 @@ def main() -> int:
     test_force_relogin_skips_session_probe()
     test_fetch_round_routes_through_ensure_login()
     test_prepare_fetch_context_runs_workflow_steps_in_order()
+    test_prepare_fetch_context_logs_ready_state()
     test_reused_supplement_page_is_reset_before_walking()
     print("登录会话复用单元测试通过 ✅")
     return 0

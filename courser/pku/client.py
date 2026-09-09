@@ -554,8 +554,19 @@ def prepare_fetch_context(session: str, creds: Optional[dict] = None,
     login_mode = ensure_login(
         session, creds=creds, window=window,
         force_relogin=force_relogin, log=log, prog=prog)
-    goto_supplement(session, window=window, log=log, prog=prog)
+    if log:
+        mode_label = "复用已有会话" if login_mode == "reuse_session" else "重新登录"
+        log(f"抓取准备：登录状态={mode_label}")
+
+    supplement_url = goto_supplement(
+        session, window=window, log=log, prog=prog)
+    if log:
+        log(f"抓取准备：补退选页面={supplement_url}")
+
     reset_supplement_to_first_page(session, log=log, prog=prog)
+    if log:
+        page = _supplement_page_number(session)
+        log(f"抓取准备：当前页={page if page is not None else '未知'}")
     return login_mode
 
 
