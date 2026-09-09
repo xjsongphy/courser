@@ -62,16 +62,19 @@ def test_force_relogin_skips_session_probe():
 def test_fetch_round_routes_through_ensure_login():
     original_ensure = client.ensure_login
     original_goto = client.goto_supplement
+    original_reset = client.reset_supplement_to_first_page
     original_walk = client.walk_pages
     calls = []
     try:
         client.ensure_login = lambda *args, **kwargs: calls.append(kwargs) or "reuse_session"
         client.goto_supplement = lambda *_args, **_kwargs: "https://elective.pku.edu.cn/SupplyCancel.do"
+        client.reset_supplement_to_first_page = lambda *_args, **_kwargs: None
         client.walk_pages = lambda *_args, **_kwargs: ([], {"pages": 1, "warning_hit": False})
         result = client.fetch_round("test", force_logout=False)
     finally:
         client.ensure_login = original_ensure
         client.goto_supplement = original_goto
+        client.reset_supplement_to_first_page = original_reset
         client.walk_pages = original_walk
 
     assert result.ok and result.login_mode == "reuse_session"
@@ -79,11 +82,34 @@ def test_fetch_round_routes_through_ensure_login():
                       "log": None, "prog": None}]
 
 
+def test_reused_supplement_page_is_reset_before_walking():
+    original_eval = client.oc.eval_js
+    original_click = client.oc.click_by
+    original_sleep = client.sleep_rand
+    try:
+        pages = iter([8, 1])
+        client.oc.eval_js = lambda *_args, **_kwargs: next(pages)
+        clicks = []
+        client.oc.click_by = lambda *_args, **kwargs: clicks.append(kwargs) or True
+        client.sleep_rand = lambda *_args: None
+        logs = []
+        client.reset_supplement_to_first_page("test", log=logs.append)
+    finally:
+        client.oc.eval_js = original_eval
+        client.oc.click_by = original_click
+        client.sleep_rand = original_sleep
+
+    assert clicks == [{"role": "link", "name": "First"}]
+    assert any("第 8 页" in message for message in logs)
+    assert any("第 1 页" in message for message in logs)
+
+
 def main() -> int:
     test_reuses_valid_session_without_login()
     test_invalid_session_falls_back_to_login()
     test_force_relogin_skips_session_probe()
     test_fetch_round_routes_through_ensure_login()
+    test_reused_supplement_page_is_reset_before_walking()
     print("登录会话复用单元测试通过 ✅")
     return 0
 

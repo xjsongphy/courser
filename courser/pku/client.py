@@ -487,6 +487,60 @@ def goto_supplement(session: str, window: Optional[str] = None,
     raise FetchError(f"点击「补退选」后页面未变化，当前 url={oc.get_url(session)}")
 
 
+_PAGER_PAGE_JS = (
+    r"(() => { const m = (document.body.innerText || '').match("
+    r"/Page\s+(\d+)\s+of\s+(\d+)/i); return m ? +m[1] : null; })()"
+)
+
+
+def _supplement_page_number(session: str) -> Optional[int]:
+    """返回补退选列表当前页；页面尚未渲染分页器时返回 ``None``。"""
+    try:
+        value = oc.eval_js(session, _PAGER_PAGE_JS)
+    except Exception:
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def reset_supplement_to_first_page(session: str,
+                                   log: Optional[Callable[[str], None]] = None,
+                                   prog: Optional[Progress] = None) -> None:
+    """复用会话时，将上轮停留的补退选分页复位到第一页。
+
+    不能仅靠 ``goto_supplement``：若当前已经是 SupplyCancel 页面，它会正确地
+    原地返回，但页面可能正停在最后一页。这里用分页器自身的 First/1 链接复位，
+    不拼接 URL，也不绕过网站正常的翻页流程。
+    """
+    current = _supplement_page_number(session)
+    if current is None or current <= 1:
+        return
+    if log:
+        log(f"检测到补退选列表停在第 {current} 页，正在返回第 1 页")
+    if prog:
+        prog.step("补退选列表返回第 1 页")
+
+    # 北大旧选课页的分页器使用英文 First；部分皮肤只提供数字页码，因此回退
+    # 到精确名称 "1"。两者均由 opencli 的可访问性定位点击，不直接构造分页 URL。
+    for name in ("First", "1"):
+        try:
+            clicked = oc.click_by(session, role="link", name=name)
+        except Exception:
+            clicked = False
+        if not clicked:
+            continue
+        for _ in range(8):
+            sleep_rand(0.4, 0.8)
+            page = _supplement_page_number(session)
+            if page == 1:
+                if log:
+                    log("补退选列表已回到第 1 页")
+                return
+
+    # 不允许把最后一页当成“只有一页”后静默成功，否则监控结果会不完整。
+    page = _supplement_page_number(session)
+    raise FetchError(f"补退选列表无法回到第 1 页（当前第 {page or '?'} 页）")
+
+
 # ---------------------------------------------------------------------------
 # 动态翻页抓取（仅可用列表）
 # ---------------------------------------------------------------------------
@@ -601,6 +655,7 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
             session, creds=creds, window=window,
             force_relogin=force_logout, log=log, prog=prog)
         goto_supplement(session, window=window, log=log, prog=prog)
+        reset_supplement_to_first_page(session, log=log, prog=prog)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
                                           log=log, prog=prog)
         result.pages = meta.get("pages", 0)
