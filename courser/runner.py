@@ -17,6 +17,7 @@ import time
 from typing import Callable, Optional
 
 from . import notifier
+from . import opencli
 from .filters import FilterSet
 from .models import Course, FetchResult, RoundResult
 from .pku import client
@@ -42,7 +43,9 @@ class RoundRunner:
         self.notify_store = notify_store or NotificationStateStore()
         self.budget_store = budget_store or SendBudgetStore()
         self._round_lock = threading.Lock()
+        self._cancel_lock = threading.Lock()
         self._notify_lock = threading.Lock()
+        self._active_cancel: Optional[threading.Event] = None
         self.last_result: Optional[RoundResult] = None
         self.current_round_started_at: Optional[float] = None  # 用于「本轮已用时」实时显示
 
@@ -88,21 +91,39 @@ class RoundRunner:
         if fr.warning_checked:
             self.risk.record(fr.warning_hit)
 
+    def cancel_current_round(self) -> None:
+        """请求停止正在进行的一轮；不会影响未来新启动的轮次。"""
+        with self._cancel_lock:
+            if self._active_cancel is not None:
+                self._active_cancel.set()
+
     # -- 一轮 ------------------------------------------------------------
-    def run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
+    def run_round(self, fetch_round: Optional[Callable] = None,
+                  cancel_event: Optional[threading.Event] = None) -> RoundResult:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
+            # 调度器传入它自己的停止事件，消除「刚准备开始一轮时收到 stop」的竞态；
+            # 手动抓取则拥有独立事件，只取消当前这一轮。
+            cancel_event = cancel_event or threading.Event()
+            with self._cancel_lock:
+                self._active_cancel = cancel_event
             self.current_round_started_at = time.time()
             try:
-                result = self._run_round(fetch_round=fetch_round)
+                with opencli.cancellation_scope(cancel_event):
+                    result = self._run_round(fetch_round=fetch_round,
+                                             cancel_event=cancel_event)
             finally:
                 # 先结束“进行中”状态，再通知 UI；否则 UI 回调可能把“本轮完成”
                 # 渲染成仍在抓取，且计时器停止后没有下一次刷新机会。
                 self.current_round_started_at = None
+                with self._cancel_lock:
+                    if self._active_cancel is cancel_event:
+                        self._active_cancel = None
             self.last_result = result
             self.on_round(result)
             return result
 
-    def _run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
+    def _run_round(self, fetch_round: Optional[Callable] = None,
+                   cancel_event: Optional[threading.Event] = None) -> RoundResult:
         """执行完整一轮。fetch_round 可注入（默认真抓取），便于测试。"""
         fetch_round = fetch_round or client.fetch_round
         r = RoundResult(ts=time.time())
@@ -138,7 +159,9 @@ class RoundRunner:
                              f"秒后重试一次…")
                     if _prog:
                         _prog(0, None, "本轮失败，等待片刻后重试…")
-                    time.sleep(random.uniform(*self.retry_delay_range))
+                    if cancel_event and cancel_event.wait(
+                            random.uniform(*self.retry_delay_range)):
+                        raise opencli.OpenCliCancelled(["courser", "retry"])
                     fr = fetch_round(
                         session=self.cfg.session,
                         creds=creds,

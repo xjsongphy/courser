@@ -148,6 +148,7 @@ class CourserApp(App):
         # 空白区域使用终端自身的默认背景/调色板，不铺 Textual 深色主题底。
         super().__init__(ansi_color=True)
         self.cfg = cfg
+        self._shutting_down = False
         self.page = "main"
         self.log_buf: list[str] = []
         self.courses: list[Course] = []
@@ -201,7 +202,13 @@ class CourserApp(App):
             self._render_main_lite()
 
     def _thread_log(self, msg: str) -> None:
-        self.call_from_thread(self.log_line, msg)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self.log_line, msg)
+        except RuntimeError:
+            # 退出后事件循环已关闭；后台线程只需自行收尾，不能再等待 UI。
+            pass
 
     # ------------------------------------------------------------------
     # 状态文本（数据与排版分离：先取语义数据，再套统一原语）
@@ -1486,7 +1493,12 @@ class CourserApp(App):
     # 抓取进度（本轮步骤 + 当前操作实时提示）
     # ------------------------------------------------------------------
     def _thread_progress(self, done, total, op):
-        self.call_from_thread(self._set_progress, done, total, op)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self._set_progress, done, total, op)
+        except RuntimeError:
+            pass
 
     def _set_progress(self, done, total, op):
         self.prog.done, self.prog.total, self.prog.op = done, total, op
@@ -1599,7 +1611,7 @@ class CourserApp(App):
         # q = 退出（筛选页里 q 是搜索字符，用 Esc 返回后 q 或 Ctrl+C 退出）
         if page != "filters" and k == "q":
             event.stop()
-            self.exit()
+            self.action_quit()
             return
 
         if page == "setup":
@@ -1731,7 +1743,7 @@ class CourserApp(App):
             self._show("help")
         elif k == "q":
             event.stop()
-            self.exit()
+            self.action_quit()
         elif k in ("/", "slash") and self.courses:
             event.stop()
             self._begin_search()
@@ -1833,7 +1845,7 @@ class CourserApp(App):
             self._finish_setup()
         elif k == "escape":
             event.stop()
-            self.exit()  # 首启 Esc = 退出程序
+            self.action_quit()  # 首启 Esc = 退出程序
 
     def _finish_setup(self) -> None:
         self.cfg.first_run_done = True
@@ -1966,7 +1978,7 @@ class CourserApp(App):
         w = self.watcher
         if w is None:
             return
-        self.log_line("手动触发一轮抓取…")
+        self._thread_log("手动触发一轮抓取…")
         w.run_round()
 
     def _request_round(self) -> None:
@@ -1975,7 +1987,12 @@ class CourserApp(App):
         self._run_round()
 
     def _on_round(self, r: RoundResult) -> None:
-        self.call_from_thread(self._apply_round, r)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self._apply_round, r)
+        except RuntimeError:
+            pass
 
     def _apply_round(self, r: RoundResult) -> None:
         # 本轮结束：清掉进行中的进度，避免残留"正在读取…"
@@ -1999,8 +2016,16 @@ class CourserApp(App):
             self.log_line(f"[green]已发送提醒邮件：{names}[/]")
 
     def on_unmount(self) -> None:
+        self._shutting_down = True
         if self.watcher:
             self.watcher.stop()
+
+    def action_quit(self) -> None:
+        """先取消后台 I/O，再结束 TUI；避免退出时 worker 继续等待 UI 回调。"""
+        self._shutting_down = True
+        if self.watcher:
+            self.watcher.request_stop()
+        self.exit()
 
     @on(events.TextSelected)
     def _auto_copy_selection(self, event: events.TextSelected) -> None:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -126,6 +128,29 @@ def test_round_callback_runs_after_timer_cleanup():
     assert observed == [None]
 
 
+def test_cancel_interrupts_retry_wait():
+    """停止监控时，退避重试不应把退出拖到几十秒后。"""
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-cancel-")))
+    runner.retry_delay_range = (30, 30)
+    result = []
+    started = threading.Event()
+
+    def failing_fetch(**_k):
+        started.set()
+        return FetchResult(ok=False, error="临时网络失败")
+
+    thread = threading.Thread(
+        target=lambda: result.append(runner.run_round(fetch_round=failing_fetch)))
+    thread.start()
+    assert started.wait(1.0)
+    time.sleep(0.05)  # 让该轮进入可取消的退避等待
+    runner.cancel_current_round()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive(), "取消应立即打断重试等待"
+    assert result and not result[0].ok and "抓取已取消" in result[0].error
+
+
 def test_retry_and_no_retry_on_warning():
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
     runner.retry_delay_range = (0.1, 0.2)  # 测试用极短等待
@@ -221,6 +246,8 @@ def test_on_progress_callback():
 def main() -> int:
     test_full_round_and_cooldown()
     test_warning_and_failure()
+    test_round_callback_runs_after_timer_cleanup()
+    test_cancel_interrupts_retry_wait()
     test_retry_and_no_retry_on_warning()
     test_budget_and_snapshot()
     test_on_progress_callback()

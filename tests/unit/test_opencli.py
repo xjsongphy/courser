@@ -8,13 +8,16 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ["COURSER_CONFIG"] = str(Path(tempfile.mkdtemp()) / "config.json")
 
+from courser import opencli  # noqa: E402
 from courser.opencli import _parse_eval_output  # noqa: E402
 
 
@@ -29,8 +32,47 @@ def test_eval_coercion():
     print("✓ opencli：eval 输出 布尔/数字/JSON/文本 还原正确")
 
 
+def test_cancel_terminates_inflight_command():
+    """退出请求不应等到 opencli 的 120 秒命令超时。"""
+    event = threading.Event()
+
+    class BlockedProcess:
+        returncode = None
+
+        def __init__(self):
+            self.terminated = False
+
+        def communicate(self, timeout=None):
+            if not self.terminated:
+                event.set()
+                raise subprocess.TimeoutExpired("opencli", timeout)
+            return "", ""
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.terminated = True
+
+    proc = BlockedProcess()
+    original = opencli.subprocess.Popen
+    opencli.subprocess.Popen = lambda *args, **kwargs: proc
+    try:
+        with opencli.cancellation_scope(event):
+            try:
+                opencli._run("test", ["state"], timeout=120)
+            except opencli.OpenCliCancelled:
+                pass
+            else:
+                raise AssertionError("取消中的命令必须抛出 OpenCliCancelled")
+    finally:
+        opencli.subprocess.Popen = original
+    assert proc.terminated
+
+
 def main() -> int:
     test_eval_coercion()
+    test_cancel_terminates_inflight_command()
     print("=" * 60)
     print("opencli 单元测试通过 ✅")
     return 0
