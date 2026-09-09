@@ -110,7 +110,7 @@ class Config:
     notify: Notify = field(default_factory=Notify)
     session: str = "courser-watch"         # opencli 浏览器会话名
     window: str = "background"             # background=后台窗口，不抢焦点
-    force_relogin: bool = True             # 每轮先登出再重新登录
+    force_relogin: bool = False            # 默认复用有效会话；开启才每轮登出重登
     first_run_done: bool = False           # 初次启动向导是否已完成
     cli_log: bool = False                  # CLI 模式（无 TUI）
 

@@ -4,9 +4,10 @@
 也不负责筛选/通知（那是 runner 的事）。它只依赖：
     opencli 适配器（真实浏览器交互）、parser（纯转换）、extract（注入 JS）、human（节奏）。
 
-流程（每一轮监控都会完整执行）：
-1. 退出旧会话（logout.do，best-effort）
-2. 打开 IAAA OAuth 登录页；填凭据或等密码管理器自动填充，点登录
+流程（每一轮监控都会执行）：
+1. 默认先检查当前浏览器会话；有效则直接复用
+2. 会话失效时打开 IAAA OAuth 登录页；填凭据或等密码管理器自动填充，点登录
+   - 开启 force_relogin 时，才会先退出旧会话再登录
    - 不做验证码输入；出现验证码/错误 → 抛 LoginError，由上层降速暂停
 3. 点击菜单「补退选」进入补退选页
 4. 动态翻页（每次解析 "Page X of Y" 分页器，不固定页数），逐页只读提取可用课程
@@ -120,6 +121,28 @@ def _login_error_text(session: str) -> str:
 # ---------------------------------------------------------------------------
 # 登录
 # ---------------------------------------------------------------------------
+
+def ensure_login(session: str, creds: Optional[dict] = None,
+                 window: Optional[str] = None, force_relogin: bool = False,
+                 log: Optional[Callable[[str], None]] = None,
+                 prog: Optional[Progress] = None) -> str:
+    """确保可用登录态：默认复用当前会话，失效时才走登录流程。
+
+    ``force_relogin`` 是显式的例外：用于账号切换或排障时，每轮先登出再登录。
+    """
+    if not force_relogin:
+        if prog:
+            prog.step("检查现有 PKU 登录状态…")
+        if _on_workable_page(session):
+            if log:
+                log("已检测到有效 PKU 登录状态，复用当前会话")
+            if prog:
+                prog.step("已复用现有登录会话")
+            return "reuse_session"
+        if log:
+            log("未检测到有效登录状态，进入登录流程")
+    return login(session, creds=creds, window=window,
+                 force_logout=force_relogin, log=log, prog=prog)
 
 def _form_present(session: str) -> bool:
     """登录表单是否在位（#logon_button 存在）。页面重定向进行中时可能短暂缺失。"""
@@ -574,8 +597,9 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     result = FetchResult()
     prog = Progress(on_progress) if on_progress else None
     try:
-        result.login_mode = login(session, creds=creds, window=window,
-                                  force_logout=force_logout, log=log, prog=prog)
+        result.login_mode = ensure_login(
+            session, creds=creds, window=window,
+            force_relogin=force_logout, log=log, prog=prog)
         goto_supplement(session, window=window, log=log, prog=prog)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
                                           log=log, prog=prog)
