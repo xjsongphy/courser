@@ -1,93 +1,105 @@
 """刷课机警告触发率（风控风险评估）。
 
-无法获知选课系统内部的真实风控阈值，这里提供一个**本地启发式估算**：
+风控 = 最近 N 次**有效抓取**中，实际检测到「请勿使用刷课机 / 操作频繁」等警告的比例。
 
-- 若抓取过程中在页面文本里检测到风控/警告提示语（如「请勿使用刷课机」「过于频繁」等），
-  直接判定 100%（已触发/疑似）；
-- 否则按「请求频率」估算：请求数 ≈ 登录/登出等固定操作数 + 翻页数，
-  除以本轮耗时得到 请求/分钟；频率越高、得分越高；
-- 距离上一轮越久，得分按时间衰减（节奏放慢后风险自然回落）。
+- **有效抓取** = 真正进入了补退选页面、并读取了至少一页文本的抓取尝试
+  （见 FetchResult.warning_checked）。登录失败 / Chrome 启动失败 / opencli 异常等
+  没有机会观察风控警告的情况**不计入分母**，避免人为稀释风险率。
+- 重试的每个 attempt 独立计数（见 runner._record_sample）。
+- 历史持久化到 data/risk_history.json（保留最近 RISK_STORE_MAX=20 条）；
+  UI / 调度只统计最近 RISK_WINDOW=10 条，这样以后想改窗口不用从零积累。
 
-label: 低 <20 / 中 <50 / 高 <80 / 极高 >=80
+label: 0% 无 / 1–10% 低 / 11–30% 中 / 31–60% 高 / >60% 极高
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
+from collections import deque
+from pathlib import Path
+from typing import Optional
 
 # 页面中出现的风控/反自动化提示语
 WARNING_PATTERN = re.compile(r"刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用|禁止自动化|垃圾请求")
 
-_FIXED_REQUESTS = 4        # 登出×2 + 打开登录页 + 点击登录 ≈ 固定请求数
-_RPM_STEPS = [
-    (20.0, 100),   # >20 请求/分钟 → 100
-    (12.0, 75),    # >12 → 75
-    (8.0, 45),     # >8  → 45
-    (5.0, 20),     # >5  → 20
-    (0.0, 5),      # 其余 → 5
-]
-_DECAY_HOURS = 2.0           # 超过这么久没新请求，风险减半
-_STALE_SECONDS = 3600        # 一小时内无新评估，显示归零
+RISK_STORE_MAX = 20   # 磁盘保留的样本条数
+RISK_WINDOW = 10      # 统计 / 展示使用的最近窗口
 
 
 def has_warning_text(text: str) -> bool:
     return bool(text and WARNING_PATTERN.search(text))
 
 
-class BotRisk:
-    def __init__(self) -> None:
-        self._warning_hit = False
-        self._last_eval_ts = 0.0
-        self._last_score = 0
-        self._last_rpm = 0.0
-
-    @property
-    def warning_hit(self) -> bool:
-        return self._warning_hit
-
-    def mark_warning(self) -> None:
-        self._warning_hit = True
-
-    def evaluate(self, pages: int, duration_s: float) -> tuple[int, str]:
-        now = time.time()
-        if self._warning_hit:
-            self._last_eval_ts = now
-            self._last_score = 100
-            return 100, "已触发/疑似"
-
-        minutes = max(duration_s / 60.0, 0.1)
-        rpm = (pages + _FIXED_REQUESTS) / minutes
-        score = 5
-        for thr, pts in _RPM_STEPS:
-            if rpm > thr:
-                score = pts
-                break
-
-        # 时间衰减：与上一次评估间隔越久，风险越低
-        if self._last_eval_ts and self._last_score:
-            gap_h = (now - self._last_eval_ts) / 3600.0
-            if gap_h > _DECAY_HOURS:
-                score = min(score, int(self._last_score * 0.5))
-        if now - self._last_eval_ts > _STALE_SECONDS and self._last_eval_ts:
-            score = 0
-
-        self._last_eval_ts = now
-        self._last_score = score
-        self._last_rpm = rpm
-        return score, _label(score)
-
-    def describe(self) -> str:
-        return f"{self._last_score}%（{_label(self._last_score)}）"
-
-
-def _label(score: int) -> str:
-    if score <= 0:
+def risk_label(percent: int) -> str:
+    """按触发率分档：0 无 / 1–10 低 / 11–30 中 / 31–60 高 / >60 极高。"""
+    if percent <= 0:
         return "无"
-    if score < 20:
+    if percent <= 10:
         return "低"
-    if score < 50:
+    if percent <= 30:
         return "中"
-    if score < 80:
+    if percent <= 60:
         return "高"
     return "极高"
+
+
+class RiskHistory:
+    """实际刷课机警告事件的 rolling rate；历史持久化，进程重启不丢。
+
+    samples: deque[{"ts": float, "hit": bool}]，最多保留 maxlen 条。
+    只记录「有效抓取」（有观察机会的 attempt）。
+    """
+
+    def __init__(self, path: Optional[Path | str] = None,
+                 maxlen: int = RISK_STORE_MAX):
+        self.path = Path(path) if path else None
+        self.maxlen = maxlen
+        self.samples: deque[dict] = deque()
+        self._load()
+
+    # -- 持久化 ---------------------------------------------------------
+    def _load(self) -> None:
+        if not self.path:
+            return
+        try:
+            if self.path.exists():
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                self.samples = deque(list(raw.get("samples", []))[-self.maxlen:])
+        except Exception:
+            self.samples = deque()
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                json.dumps({"samples": list(self.samples)},
+                           ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    # -- 记录 -----------------------------------------------------------
+    def record(self, warning_hit: bool, ts: Optional[float] = None) -> None:
+        """记录一次有效抓取是否触发警告。"""
+        self.samples.append({"ts": ts or time.time(), "hit": bool(warning_hit)})
+        while len(self.samples) > self.maxlen:
+            self.samples.popleft()
+        self._save()
+
+    # -- 评估（最近窗口） -----------------------------------------------
+    def evaluate(self, window: int = RISK_WINDOW) -> tuple[Optional[int], int, int]:
+        """返回 (percent:int|None, hits:int, total:int)。
+
+        total = 最近窗口里的有效样本数（可能 < window，如刚启动）；
+        无样本 → (None, 0, 0)。
+        """
+        recent = list(self.samples)[-window:]
+        if not recent:
+            return None, 0, 0
+        hits = sum(1 for s in recent if s["hit"])
+        total = len(recent)
+        return round(hits * 100 / total), hits, total

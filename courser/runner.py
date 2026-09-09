@@ -20,8 +20,8 @@ from . import notifier
 from .filters import FilterSet
 from .models import Course, FetchResult, RoundResult
 from .pku import client
-from .risk import BotRisk
-from .storage import NotificationStateStore, SendBudgetStore
+from .risk import RiskHistory, risk_label
+from .storage import (NotificationStateStore, RISK_FILE, SendBudgetStore)
 
 
 class RoundRunner:
@@ -31,12 +31,13 @@ class RoundRunner:
                  on_round: Optional[Callable[[RoundResult], None]] = None,
                  on_progress: Optional[Callable[[int, Optional[int], str], None]] = None,
                  notify_store: Optional[NotificationStateStore] = None,
-                 budget_store: Optional[SendBudgetStore] = None):
+                 budget_store: Optional[SendBudgetStore] = None,
+                 risk_store: Optional[str] = None):
         self.cfg = cfg
         self.log = log
         self.on_round = on_round or (lambda r: None)
         self.on_progress = on_progress
-        self.risk = BotRisk()
+        self.risk = RiskHistory(path=risk_store or RISK_FILE)
         self.retry_delay_range = (20.0, 40.0)  # 整轮抓取失败后的重试等待（秒，可覆写）
         self.notify_store = notify_store or NotificationStateStore()
         self.budget_store = budget_store or SendBudgetStore()
@@ -81,6 +82,12 @@ class RoundRunner:
                                        body_html=html_body, log=self.log)
         return notifiable
 
+    # -- 风控样本记录（只在真正有机会观察警告的有效抓取里记一条）---------=
+    def _record_sample(self, fr: FetchResult) -> None:
+        """记录一次有效抓取是否触发警告；重试的每个 attempt 独立计数。"""
+        if fr.warning_checked:
+            self.risk.record(fr.warning_hit)
+
     # -- 一轮 ------------------------------------------------------------
     def run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
@@ -109,6 +116,7 @@ class RoundRunner:
                 log=self.log,
                 on_progress=_prog,
             )
+            self._record_sample(fr)
             # 失败重试机制：整轮失败且非风控提示时，等 20~40 秒重试一次
             # （人类遇到失败也会再试一次；风控命中则绝不重试硬顶）。
             # 但「登录未成功」是确定性失败（账号被拒/会话已失效/填值未触发框架），
@@ -135,6 +143,7 @@ class RoundRunner:
                         log=self.log,
                         on_progress=_prog,
                     )
+                    self._record_sample(fr)
 
             r.login_mode = fr.login_mode
             r.pages = fr.pages
@@ -142,10 +151,14 @@ class RoundRunner:
             r.courses = fr.courses
             r.warning_hit = fr.warning_hit
             if fr.warning_hit:
-                self.risk.mark_warning()
-                self.log("⚠ 检测到页面出现风控/警告提示语，已判定为高触发率，本轮照常结束但请人工关注")
-            r.risk_percent, r.risk_label = self.risk.evaluate(
-                pages=r.pages, duration_s=time.time() - t0)
+                self.log("⚠ 检测到「请勿使用刷课机」类警告")
+
+            # 最近窗口触发率（有效抓取样本）；无样本 → 未知
+            percent, hits, total = self.risk.evaluate()
+            r.risk_percent = percent or 0
+            r.risk_label = risk_label(r.risk_percent)
+            r.risk_hits = hits
+            r.risk_total = total
 
             if not fr.ok:
                 r.ok = False
@@ -154,7 +167,7 @@ class RoundRunner:
                 # 注意：不提前 return —— 也要正常收尾 duration/on_round
             else:
                 self.log(f"本轮抓取完成：{r.pages} 页，共 {r.total} 门课程；"
-                         f"登录方式={fr.login_mode}；风控触发率≈{r.risk_percent}%（{r.risk_label}）")
+                         f"登录方式={fr.login_mode}")
                 if r.warning_hit:
                     self.log("⚠ 建议暂停监控并人工登录一次，恢复后再以更低频率继续")
                 fs = FilterSet(self.cfg.filters)
@@ -167,6 +180,14 @@ class RoundRunner:
                 else:
                     self.log(f"命中 {len(r.matched)} 门，暂无空余名额"
                              + ("" if r.matched else "（且当前筛选条件未命中任何课程）"))
+
+            if not fr.warning_hit:
+                self.log("本次：未触发刷课机警告")
+            if r.risk_total:
+                self.log(f"最近 {r.risk_total} 次有效抓取：{r.risk_hits} 次触发，"
+                         f"触发率 {r.risk_percent}%")
+                if r.warning_hit:
+                    self.log("下一轮已自动放慢至约 4× 间隔")
         except Exception as exc:  # noqa: BLE001
             r.ok = False
             r.error = str(exc)

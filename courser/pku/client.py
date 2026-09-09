@@ -581,6 +581,9 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
                                           log=log, prog=prog)
         result.pages = meta.get("pages", 0)
         result.warning_hit = bool(meta.get("warning_hit"))
+        # 是否「有效抓取」：真正进入了补退选页面并读取/解析了至少一页文本。
+        # 只有这类 attempt 才有机会观察风控警告，才计入风控触发率分母。
+        result.warning_checked = result.pages >= 1
     except (FetchError, oc.OpenCliError) as exc:
         result.ok = False
         result.error = str(exc)

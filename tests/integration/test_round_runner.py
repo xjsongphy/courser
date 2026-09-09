@@ -58,7 +58,8 @@ def _make_runner(tmp: Path, max_per_hour: int = 5) -> RoundRunner:
     notify_store = NotificationStateStore(tmp / "notified.json")
     budget_store = SendBudgetStore(tmp / "send_log.json")
     return RoundRunner(cfg, log=lambda m: None,
-                       notify_store=notify_store, budget_store=budget_store)
+                       notify_store=notify_store, budget_store=budget_store,
+                       risk_store=tmp / "risk_history.json")
 
 
 def test_full_round_and_cooldown():
@@ -92,12 +93,14 @@ def test_warning_and_failure():
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
 
     def stub_warn(**k):
-        fr = FetchResult(login_mode="login_click", pages=1, ok=True, warning_hit=True)
+        fr = FetchResult(login_mode="login_click", pages=1, ok=True,
+                         warning_hit=True, warning_checked=True)
         fr.courses = []
         return fr
 
     r = runner.run_round(fetch_round=stub_warn)
-    assert r.warning_hit and r.risk_percent == 100 and r.risk_label == "已触发/疑似"
+    assert r.warning_hit and r.risk_percent == 100, "单次有效抓取命中 → 100%"
+    assert (r.risk_hits, r.risk_total) == (1, 1), "有效样本 1/1"
 
     def stub_fail(**k):
         return FetchResult(login_mode="", pages=0, ok=False, error="登录失败(验证码)")
@@ -107,7 +110,9 @@ def test_warning_and_failure():
     # 回归：失败路径也必须收尾 duration + on_round + last_result（旧 bug）
     assert r.duration_s > 0, "失败路径也应记录耗时"
     assert runner.last_result is r, "失败路径也应更新 last_result"
-    print("✓ run：风控置 100% 分支；登录失败分支不发送且正常收尾")
+    # 登录失败没有机会观察风控，不计入有效样本分母
+    assert runner.risk.evaluate() == (100, 1, 1), "未检查样本不应稀释触发率"
+    print("✓ run：风控 rolling rate；登录失败不计有效样本 / 不发送且正常收尾")
 
 
 def test_retry_and_no_retry_on_warning():
@@ -119,14 +124,17 @@ def test_retry_and_no_retry_on_warning():
         calls["n"] += 1
         if calls["n"] == 1:
             return FetchResult(login_mode="", pages=0, ok=False, error="网络抖了一下")
-        fr = FetchResult(login_mode="login_click", pages=1, ok=True)
+        fr = FetchResult(login_mode="login_click", pages=1, ok=True,
+                         warning_checked=True)
         fr.courses = [_mk_course(avail=1)]
         return fr
 
     r = runner.run_round(fetch_round=flaky)
     assert r.ok and calls["n"] == 2, f"应失败1次+重试1次，实际 {calls['n']} 次"
     assert len(r.courses) == 1
-    print("✓ run：失败自动重试一次")
+    # 两次 attempt 独立统计：首次失败（未检查，不入样本）+ 重试成功（有效样本 False）
+    assert runner.risk.evaluate() == (0, 0, 1), "只有重试那次有效抓取计样本"
+    print("✓ run：失败自动重试一次；每个 attempt 独立统计")
 
     calls["n"] = 0
     runner2 = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))

@@ -55,7 +55,7 @@ async def _capture(w: int, h: int) -> tuple[str, str]:
         app.courses = COURSES
         app.main.snapshot_ts = "2026-09-07 19:39:41"
         app.main.snapshot_meta = "8 页 · 152 门课程"
-        app.main.snapshot_risk = (5, "低")
+        app.main.snapshot_risk = (5, "低", 5, 100)
         app._render_main(force=True)
         await p.pause(0.2)
         hero = _renderable_text(app.query_one("#hero").render(), w - 4)
@@ -77,7 +77,7 @@ async def test_hero_layout() -> None:
         assert field in hero, f"Hero 缺字段 {field}"
     assert "19:39" in hero, "最近抓取应为紧凑时间（同一天 HH:MM）"
     assert "8 页 · 152 门课程" in hero, "数据字段应含抓取规模"
-    assert "5%" in hero and "低" in hero, "Hero 应显示风控值 5%（低）"
+    assert "5%" in hero and "5/100" in hero, "Hero 应显示风控 5%（5/100）"
     assert "开课院系×1" in hero, "筛选摘要应含开课院系计数"
     # 窄屏：退化为单栏（筛选 与 最近抓取 各占一行）
     hero80, _ = await _capture(80, 24)
@@ -101,15 +101,17 @@ async def test_table_alignment_and_format() -> None:
 
 
 async def test_risk_unknown_and_high():
-    """风控未知 → '—'；高/极高 → 红色标记（不崩溃）。"""
+    """风控未知/无样本 → '—'；高/极高 → 红色；0% → 绿色（不崩溃）。"""
     app = CourserApp(Config())
     app.main.snapshot_risk = None
     assert "—" in app._risk_value_markup()
-    app.main.snapshot_risk = (100, "极高")
+    app.main.snapshot_risk = (0, "无", 0, 0)
+    assert "—" in app._risk_value_markup(), "无样本应对显示未知"
+    app.main.snapshot_risk = (100, "极高", 10, 10)
     m = app._risk_value_markup()
-    assert "100%" in m and "极高" in m and "red" in m
-    app.main.snapshot_risk = (0, "无")
-    assert "0%（无）" in app._risk_value_markup()
+    assert "100%" in m and "red" in m
+    app.main.snapshot_risk = (0, "无", 0, 10)
+    assert "0%（0/10）" in app._risk_value_markup()
 
 
 async def main() -> int:

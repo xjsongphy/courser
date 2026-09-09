@@ -682,24 +682,22 @@ class CourserApp(App):
         return grid
 
     def _risk_value_markup(self) -> str:
-        """风控一行：未知 → '—'；0%/低 绿 · 中 黄 · 高/极高/已触发 红。"""
+        """风控一行：无样本/未知 → '—'；格式 `percent%（hits/total）`，
+        小样本如实显示（如 33%（1/3））；颜色：0/低 绿 · 中 黄 · 高/极高 红。"""
         risk = self.main.snapshot_risk
         if not risk:
             return ui_meta("—")
-        percent, label = risk
         try:
-            percent = int(percent or 0)
+            percent, label, hits, total = risk
+            percent, hits, total = int(percent or 0), int(hits or 0), int(total or 0)
         except Exception:
-            percent = 0
-        if label == "无" or percent <= 0:
-            return f"[green]0%（无）[/]"
-        if label == "低":
-            color = "green"
-        elif label == "中":
-            color = "yellow"
-        else:
-            color = "red"
-        return f"[{color}]{percent}%（{label}）[/]"
+            return ui_meta("—")
+        if total <= 0:
+            return ui_meta("—")
+        if percent <= 0:
+            return f"[green]0%（0/{total}）[/]"
+        color = {"低": "green", "中": "yellow"}.get(label, "red")
+        return f"[{color}]{percent}%（{hits}/{total}）[/]"
 
     def _render_hero(self) -> None:
         t, meta = self._last_success()
@@ -1982,7 +1980,8 @@ class CourserApp(App):
             self.candidate_lists = self.snapshot.save(r)
             self.main.snapshot_ts = time.strftime("%Y-%m-%d %H:%M:%S")
             self.main.snapshot_meta = f"{r.pages} 页 · {len(r.courses)} 门课程"
-            self.main.snapshot_risk = (r.risk_percent, r.risk_label)
+            self.main.snapshot_risk = (r.risk_percent, r.risk_label,
+                                       r.risk_hits, r.risk_total)
         if self.fv.gathering:
             self._on_gather_done()
         if self.page == "main":

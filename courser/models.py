@@ -77,6 +77,8 @@ class FetchResult:
     ok: bool = True
     error: str = ""
     warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
+    warning_checked: bool = False  # 本轮是否真正进入了补退选页面、并读取了至少一页文本
+                                 # （有观察风控警告的机会，才计入风控触发率分母）
 
 
 def is_real_course(c: "Course") -> bool:
@@ -106,5 +108,7 @@ class RoundResult:
     notified: list = field(default_factory=list)
     duration_s: float = 0.0
     warning_hit: bool = False        # 页面检测到风控提示语
-    risk_percent: int = 0            # 刷课机警告触发率估计（0~100）
+    risk_percent: int = 0            # 最近 N 次有效抓取中实际警告触发率（0~100）
     risk_label: str = "无"
+    risk_hits: int = 0               # 最近窗口内触发警告的有效抓取次数
+    risk_total: int = 0              # 最近窗口内的有效抓取总次数

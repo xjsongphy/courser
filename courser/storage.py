@@ -23,6 +23,7 @@ from .models import Course, RoundResult, is_real_course
 SNAPSHOT_FILE = DATA_DIR / "last_round.json"
 STATE_FILE = DATA_DIR / "notified.json"
 SEND_LOG_FILE = DATA_DIR / "send_log.json"
+RISK_FILE = DATA_DIR / "risk_history.json"    # 风控警告事件历史（最近 N 次有效抓取）
 
 
 def _atomic_write(path: Path, data) -> None:
@@ -86,14 +87,16 @@ class SnapshotStore:
         return ts, meta
 
     def risk(self) -> Optional[tuple]:
-        """返回 (risk_percent, risk_label)；旧快照缺失风控信息 → None（未知）。"""
+        """返回 (risk_percent, risk_label, risk_hits, risk_total)；
+        旧快照缺失风控信息 → None（未知）。"""
         d = self.load()
         if not d:
             return None
-        p, lab = d.get("risk_percent"), d.get("risk_label")
+        p = d.get("risk_percent")
         if p is None:
             return None
-        return int(p), str(lab or "无")
+        return (int(p), str(d.get("risk_label") or "无"),
+                int(d.get("risk_hits") or 0), int(d.get("risk_total") or 0))
 
     def save(self, r: RoundResult, ts: Optional[str] = None) -> dict:
         """保存一轮结果并返回 distinct 候选。"""
@@ -105,6 +108,7 @@ class SnapshotStore:
         ts = ts or time.strftime("%Y-%m-%d %H:%M:%S")
         d = {"ts": ts, "pages": r.pages, "n": len(r.courses),
              "risk_percent": r.risk_percent, "risk_label": r.risk_label,
+             "risk_hits": r.risk_hits, "risk_total": r.risk_total,
              "distinct": distinct, "courses": [c.__dict__ for c in r.courses]}
         try:
             _atomic_write(self.path, d)
