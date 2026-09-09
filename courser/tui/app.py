@@ -27,6 +27,7 @@ Esc 取消；没有独立输入框。筛选页的搜索则直接输入即过滤�
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import time
 from datetime import datetime, timedelta
@@ -149,6 +150,7 @@ class CourserApp(App):
         super().__init__(ansi_color=True)
         self.cfg = cfg
         self._shutting_down = False
+        self._shutdown_message: Optional[str] = None
         self.page = "main"
         self.log_buf: list[str] = []
         self.courses: list[Course] = []
@@ -1565,7 +1567,9 @@ class CourserApp(App):
         """底部唯一的全局 activity 行：抓取中 / 监控等待 / 空闲 — 互斥，只留一行。
         只在真有事件（抓取轮变化、开始/完成）时重绘，杜绝每秒周期刷新。"""
         w = self.watcher
-        if w and w.current_round_started_at is not None:
+        if self._shutdown_message:
+            line = f"{ui_meta('状态')}  {ui_warn(self._shutdown_message)}"
+        elif w and w.current_round_started_at is not None:
             line = self._activity_fetching(w)
         else:
             line = self._activity_steady(w)
@@ -2021,10 +2025,24 @@ class CourserApp(App):
             self.watcher.stop()
 
     def action_quit(self) -> None:
-        """先取消后台 I/O，再结束 TUI；避免退出时 worker 继续等待 UI 回调。"""
+        """发起非阻塞退出；后台 I/O 收尾完成后再结束 TUI。"""
+        if self._shutting_down:
+            return
         self._shutting_down = True
+        self._shutdown_message = "收到取消请求…正在停止浏览器操作…"
+        self._render_runstate()
+        self.run_worker(self._quit_after_stop(), exclusive=True,
+                        name="courser-shutdown")
+
+    async def _quit_after_stop(self) -> None:
+        """在不阻塞 Textual 事件循环的情况下等待监控线程收尾。"""
         if self.watcher:
-            self.watcher.request_stop()
+            # stop() 会 request_stop 后 join；放到线程池，避免冻结 TUI 及其退出提示。
+            await asyncio.to_thread(self.watcher.stop)
+        self._shutdown_message = "✓ 已停止"
+        self._render_runstate()
+        # 给 Textual 一个事件循环周期，确保最终状态能真正绘制出来。
+        await asyncio.sleep(0.05)
         self.exit()
 
     @on(events.TextSelected)
