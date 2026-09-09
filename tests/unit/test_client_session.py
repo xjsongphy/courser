@@ -60,26 +60,39 @@ def test_force_relogin_skips_session_probe():
 
 
 def test_fetch_round_routes_through_ensure_login():
-    original_ensure = client.ensure_login
-    original_goto = client.goto_supplement
-    original_reset = client.reset_supplement_to_first_page
+    original_prepare = client.prepare_fetch_context
     original_walk = client.walk_pages
     calls = []
     try:
-        client.ensure_login = lambda *args, **kwargs: calls.append(kwargs) or "reuse_session"
-        client.goto_supplement = lambda *_args, **_kwargs: "https://elective.pku.edu.cn/SupplyCancel.do"
-        client.reset_supplement_to_first_page = lambda *_args, **_kwargs: None
+        client.prepare_fetch_context = lambda *args, **kwargs: calls.append(kwargs) or "reuse_session"
         client.walk_pages = lambda *_args, **_kwargs: ([], {"pages": 1, "warning_hit": False})
         result = client.fetch_round("test", force_logout=False)
     finally:
-        client.ensure_login = original_ensure
-        client.goto_supplement = original_goto
-        client.reset_supplement_to_first_page = original_reset
+        client.prepare_fetch_context = original_prepare
         client.walk_pages = original_walk
 
     assert result.ok and result.login_mode == "reuse_session"
     assert calls == [{"creds": None, "window": None, "force_relogin": False,
                       "log": None, "prog": None}]
+
+
+def test_prepare_fetch_context_runs_workflow_steps_in_order():
+    original_ensure = client.ensure_login
+    original_goto = client.goto_supplement
+    original_reset = client.reset_supplement_to_first_page
+    calls = []
+    try:
+        client.ensure_login = lambda *_args, **_kwargs: calls.append("login") or "reuse_session"
+        client.goto_supplement = lambda *_args, **_kwargs: calls.append("supplement")
+        client.reset_supplement_to_first_page = lambda *_args, **_kwargs: calls.append("first")
+        mode = client.prepare_fetch_context("test", force_relogin=False)
+    finally:
+        client.ensure_login = original_ensure
+        client.goto_supplement = original_goto
+        client.reset_supplement_to_first_page = original_reset
+
+    assert mode == "reuse_session"
+    assert calls == ["login", "supplement", "first"]
 
 
 def test_reused_supplement_page_is_reset_before_walking():
@@ -109,6 +122,7 @@ def main() -> int:
     test_invalid_session_falls_back_to_login()
     test_force_relogin_skips_session_probe()
     test_fetch_round_routes_through_ensure_login()
+    test_prepare_fetch_context_runs_workflow_steps_in_order()
     test_reused_supplement_page_is_reset_before_walking()
     print("登录会话复用单元测试通过 ✅")
     return 0

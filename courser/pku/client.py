@@ -541,6 +541,24 @@ def reset_supplement_to_first_page(session: str,
     raise FetchError(f"补退选列表无法回到第 1 页（当前第 {page or '?'} 页）")
 
 
+def prepare_fetch_context(session: str, creds: Optional[dict] = None,
+                          window: Optional[str] = None,
+                          force_relogin: bool = False,
+                          log: Optional[Callable[[str], None]] = None,
+                          prog: Optional[Progress] = None) -> str:
+    """准备一轮抓取的工作上下文，并返回本轮登录方式。
+
+    这里集中维护抓取前的不变量：已认证、位于补退选页面、分页从第 1 页开始。
+    ``walk_pages`` 因此只负责读取和翻页，不再隐含假设浏览器当前停留位置。
+    """
+    login_mode = ensure_login(
+        session, creds=creds, window=window,
+        force_relogin=force_relogin, log=log, prog=prog)
+    goto_supplement(session, window=window, log=log, prog=prog)
+    reset_supplement_to_first_page(session, log=log, prog=prog)
+    return login_mode
+
+
 # ---------------------------------------------------------------------------
 # 动态翻页抓取（仅可用列表）
 # ---------------------------------------------------------------------------
@@ -651,11 +669,9 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     result = FetchResult()
     prog = Progress(on_progress) if on_progress else None
     try:
-        result.login_mode = ensure_login(
+        result.login_mode = prepare_fetch_context(
             session, creds=creds, window=window,
             force_relogin=force_logout, log=log, prog=prog)
-        goto_supplement(session, window=window, log=log, prog=prog)
-        reset_supplement_to_first_page(session, log=log, prog=prog)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
                                           log=log, prog=prog)
         result.pages = meta.get("pages", 0)
