@@ -1036,7 +1036,12 @@ class CourserApp(App):
             extra = " [dim](手动添加)[/]" if it not in cands else ""
             out.append(f"{cur} {mark} {ui_value(it)}{extra}")
         listw.update("\n".join(out))
-        self.call_after_refresh(self._scroll_filters_to_selection)
+        # 搜索框是这条纵向焦点链的起点。重进页面、切维度或改查询时会回到
+        # SEARCH/index=0；同时必须清掉上次浏览候选留下的物理 scroll_y，不能
+        # 只重置状态而让列表仍停在旧位置，把焦点标记裁到 viewport 外。
+        follow = (self._scroll_filters_to_selection if self.fv.focus == "list"
+                  else self._reset_filters_scroll)
+        self.call_after_refresh(follow)
 
     def _filters_hint(self) -> str:
         """只显示当前焦点真正可用的键，消除 Space 的二义性。"""
@@ -1072,6 +1077,14 @@ class CourserApp(App):
             1,
         )
         scroll.scroll_to_region(row, animate=False, force=True)
+
+    def _reset_filters_scroll(self) -> None:
+        """SEARCH 焦点时回到候选起点，令状态索引与真实 viewport 一致。"""
+        try:
+            scroll = self.query_one("#filtersscroll", FocusScroll)
+            scroll.scroll_to(y=0, animate=False, force=True, immediate=True)
+        except Exception:
+            pass
 
     def _filters_move(self, step: int) -> None:
         items = self._filters_items()
