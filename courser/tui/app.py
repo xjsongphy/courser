@@ -925,7 +925,7 @@ class CourserApp(App):
         self.fv.gathering = True
         self.log_line("暂无最近抓取结果，自动抓取一轮以生成候选…")
         self._render_filters_list()
-        self._run_round()
+        self._request_round()
 
     def _on_gather_done(self) -> None:
         self.fv.gathering = False
@@ -1707,7 +1707,7 @@ class CourserApp(App):
             self._toggle_monitor()
         elif k == "r":
             event.stop()
-            self._run_round()
+            self._request_round()
         elif k == "1":
             event.stop()
             self._set_view("all")
@@ -1968,6 +1968,11 @@ class CourserApp(App):
             return
         self.log_line("手动触发一轮抓取…")
         w.run_round()
+
+    def _request_round(self) -> None:
+        """从 UI 线程发起抓取：先启动实时计时，再把整轮工作交给后台线程。"""
+        self._start_live_ticker()
+        self._run_round()
 
     def _on_round(self, r: RoundResult) -> None:
         self.call_from_thread(self._apply_round, r)

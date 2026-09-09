@@ -93,9 +93,14 @@ class RoundRunner:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
             self.current_round_started_at = time.time()
             try:
-                return self._run_round(fetch_round=fetch_round)
+                result = self._run_round(fetch_round=fetch_round)
             finally:
+                # 先结束“进行中”状态，再通知 UI；否则 UI 回调可能把“本轮完成”
+                # 渲染成仍在抓取，且计时器停止后没有下一次刷新机会。
                 self.current_round_started_at = None
+            self.last_result = result
+            self.on_round(result)
+            return result
 
     def _run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
         """执行完整一轮。fetch_round 可注入（默认真抓取），便于测试。"""
@@ -195,6 +200,4 @@ class RoundRunner:
 
         r.duration_s = time.time() - t0
         r.ts = time.time()
-        self.last_result = r
-        self.on_round(r)
         return r

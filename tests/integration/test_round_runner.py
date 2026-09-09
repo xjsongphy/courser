@@ -115,6 +115,17 @@ def test_warning_and_failure():
     print("✓ run：风控 rolling rate；登录失败不计有效样本 / 不发送且正常收尾")
 
 
+def test_round_callback_runs_after_timer_cleanup():
+    """UI 回调执行时，本轮计时必须已经结束，避免完成态被渲染成抓取中。"""
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-callback-")))
+    observed = []
+    runner.on_round = lambda _r: observed.append(runner.current_round_started_at)
+
+    runner.run_round(fetch_round=lambda **_k: FetchResult(pages=1, ok=True))
+
+    assert observed == [None]
+
+
 def test_retry_and_no_retry_on_warning():
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
     runner.retry_delay_range = (0.1, 0.2)  # 测试用极短等待
