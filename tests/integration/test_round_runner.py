@@ -151,6 +151,22 @@ def test_cancel_interrupts_retry_wait():
     assert result and not result[0].ok and "抓取已取消" in result[0].error
 
 
+def test_user_cancel_is_not_reported_as_fetch_failure_or_retried():
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-cancel-result-")))
+    calls = []
+
+    def cancelled_fetch(**_k):
+        calls.append(True)
+        return FetchResult(ok=False, cancelled=True, error="抓取已取消，正在退出")
+
+    result = runner.run_round(fetch_round=cancelled_fetch)
+
+    assert len(calls) == 1
+    assert result.cancelled
+    assert not result.ok
+    assert "抓取已取消" in result.error
+
+
 def test_retry_and_no_retry_on_warning():
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
     runner.retry_delay_range = (0.1, 0.2)  # 测试用极短等待

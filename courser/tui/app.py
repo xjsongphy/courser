@@ -1566,6 +1566,8 @@ class CourserApp(App):
         anchor = ui_meta("• 状态")
         if w and w.running:
             status = ui_ok("监控中")
+        elif w and w.last_result and w.last_result.cancelled:
+            status = ui_warn("本轮已停止")
         elif w and w.last_result and not w.last_result.ok:
             status = ui_error("抓取失败")
         else:

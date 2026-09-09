@@ -148,7 +148,7 @@ class RoundRunner:
             # 但「登录未成功」是确定性失败（账号被拒/会话已失效/填值未触发框架），
             # 原地重试只会重复一整轮慢登录（约 1~3 分钟）纯浪费 —— 不原地重试，
             # 交给下一轮调度重试，并明确提示人工处理。
-            if not fr.ok and not fr.warning_hit:
+            if not fr.ok and not fr.warning_hit and not fr.cancelled:
                 if fr.error.startswith("登录未成功"):
                     self.log("本轮失败：登录未成功。重试无法解决账号/登录问题，"
                              "本轮不原地重试；请检查配置的学号/密码，或先在 Chrome 手动登录"
@@ -177,6 +177,7 @@ class RoundRunner:
             r.pages = fr.pages
             r.total = len(fr.courses)
             r.courses = fr.courses
+            r.cancelled = fr.cancelled
             r.warning_hit = fr.warning_hit
             if fr.warning_hit:
                 self.log("⚠ 检测到「请勿使用刷课机」类警告")
@@ -188,7 +189,11 @@ class RoundRunner:
             r.risk_hits = hits
             r.risk_total = total
 
-            if not fr.ok:
+            if fr.cancelled:
+                r.ok = False
+                r.error = fr.error
+                self.log("本轮已停止（用户取消）")
+            elif not fr.ok:
                 r.ok = False
                 r.error = fr.error
                 self.log(f"✗ 本轮失败：{fr.error}")
@@ -216,6 +221,11 @@ class RoundRunner:
                          f"触发率 {r.risk_percent}%")
                 if r.warning_hit:
                     self.log("下一轮已自动放慢至约 4× 间隔")
+        except opencli.OpenCliCancelled as exc:
+            r.ok = False
+            r.cancelled = True
+            r.error = str(exc)
+            self.log("本轮已停止（用户取消）")
         except Exception as exc:  # noqa: BLE001
             r.ok = False
             r.error = str(exc)
