@@ -185,8 +185,62 @@ def test_send_retry_and_status():
     print("✓ 发信重试：失败-失败-成功→成功；全失败→失败并更新状况")
 
 
+def test_gws_auth_status_parsing():
+    saved_run, saved_which = notifier.subprocess.run, notifier.shutil.which
+    try:
+        notifier.shutil.which = lambda n: ("/usr/local/bin/gws" if n == "gws" else None)
+
+        notifier.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout=json.dumps({"token_valid": True,
+                                              "user": "me@gmail.com"}), stderr="")
+        st = notifier.gws_auth_status()
+        assert (st.auth, st.account) == ("ready", "me@gmail.com")
+
+        notifier.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout=json.dumps({"token_valid": False,
+                                              "token_cache_exists": True}), stderr="")
+        assert notifier.gws_auth_status().auth == "invalid", "有凭证但 token 失效 → invalid"
+
+        notifier.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0, stdout="{}", stderr="")
+        assert notifier.gws_auth_status().auth == "missing", "无凭证 → missing"
+
+        notifier.subprocess.run = lambda cmd, **kw: (
+            (_ for _ in ()).throw(RuntimeError("boom")))
+        assert notifier.gws_auth_status().auth == "unknown", "探测异常 → unknown"
+        print("✓ gws 授权状态解析：ready / invalid / missing / unknown")
+    finally:
+        notifier.subprocess.run, notifier.shutil.which = saved_run, saved_which
+
+
+def test_gws_auth_status_cached():
+    saved_run, saved_which = notifier.subprocess.run, notifier.shutil.which
+    saved_cache, saved_at = notifier._auth_cache, notifier._auth_cache_at
+    counter = {"n": 0}
+    try:
+        notifier.shutil.which = lambda n: ("/usr/local/bin/gws" if n == "gws" else None)
+
+        def run(cmd, **kw):
+            counter["n"] += 1
+            return types.SimpleNamespace(returncode=0,
+                                         stdout='{"token_valid": true, "user":"x@gmail.com"}',
+                                         stderr="")
+        notifier.subprocess.run = run
+        notifier._auth_cache = None
+        notifier.gws_auth_status_cached()
+        notifier.gws_auth_status_cached()
+        assert counter["n"] == 1, "TTL 内应命中缓存，不重复起 subprocess"
+        print("✓ gws 授权状态缓存：TTL 内复用（不重复起 subprocess）")
+    finally:
+        notifier.subprocess.run, notifier.shutil.which = saved_run, saved_which
+        notifier._auth_cache, notifier._auth_cache_at = saved_cache, saved_at
+
+
 def main() -> int:
     test_failure_branches()
+    test_gws_install_hint()
+    test_gws_auth_status_parsing()
+    test_gws_auth_status_cached()
     test_send_and_profile()
     test_build_body_columns()
     test_send_mime()

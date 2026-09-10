@@ -19,7 +19,9 @@ import html
 import json
 import shutil
 import subprocess
+import threading
 import time
+from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Callable, Optional
 
@@ -43,6 +45,65 @@ _last_mail_at: float = 0.0
 
 def gws_available() -> bool:
     return shutil.which(_GWS) is not None
+
+
+@dataclass
+class GwsStatus:
+    """gws 授权状态模型。
+
+    auth: ready（已授权）/ invalid（token 失效）/ missing（未登录）/ unknown（探测失败）
+    account: 认证账号邮箱（可用时）。
+    """
+
+    auth: str = "unknown"
+    account: Optional[str] = None
+
+
+def gws_auth_status(timeout: float = 20.0) -> GwsStatus:
+    """真正探测 gws 授权状态：跑 `gws auth status` 并解析 token_valid / user。
+
+    不再拿 `_gws_profile_email` 当授权探针——它调用的是 Gmail 只读 profile，
+    与纯 `gmail.send` scope 并不等价，且不区分"未登录"与"token 失效"。
+    """
+    try:
+        proc = subprocess.run([_GWS, "auth", "status"],
+                              capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return GwsStatus(auth="unknown")
+    if proc.returncode != 0:
+        out = (proc.stdout or "") + (proc.stderr or "")
+        return GwsStatus(auth="missing" if ("login" in out or "not" in out.lower()) else "unknown")
+    try:
+        d = json.loads(proc.stdout or "{}")
+    except Exception:
+        return GwsStatus(auth="unknown")
+    valid = bool(d.get("token_valid"))
+    account = str(d.get("user") or "").strip() or None
+    if valid:
+        return GwsStatus(auth="ready", account=account)
+    has_creds = bool(d.get("token_cache_exists")
+                     or d.get("plain_credentials_exists")
+                     or d.get("encrypted_credentials_exists"))
+    return GwsStatus(auth="invalid" if has_creds else "missing", account=account)
+
+
+# 授权状态缓存（避免每次渲染都起 subprocess）；60s TTL，足够短不至于误导。
+_AUTH_TTL = 60.0
+_auth_cache: Optional[GwsStatus] = None
+_auth_cache_at: float = 0.0
+_auth_lock = threading.Lock()
+
+
+def gws_auth_status_cached(ttl: float = _AUTH_TTL) -> GwsStatus:
+    """带缓存的授权状态；首次调用起 subprocess，TTL 内直接复用。"""
+    global _auth_cache, _auth_cache_at
+    now = time.time()
+    with _auth_lock:
+        if _auth_cache is not None and (now - _auth_cache_at) < ttl:
+            return _auth_cache
+        st = gws_auth_status()
+        _auth_cache, _auth_cache_at = st, now
+        return st
 
 
 def _gws_profile_email(log: Optional[Callable[[str], None]] = None) -> Optional[str]:
