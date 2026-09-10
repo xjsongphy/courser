@@ -72,19 +72,20 @@ class _OCHarness:
 
 
 def _fetch(harness):
-    """替换 oc 的 eval_js/click_by + 跳过登录/进入页，直接测抓取链路。"""
+    """替换 oc 的 eval_js/click_by + 跳过抓取前准备，直接测抓取链路。
+    注：远端已把登录/进入补退选/重置页码集中到 prepare_fetch_context，
+    这里只 mock 它返回登录方式，让 walk_pages 走真正浏览器三态判定。"""
     saved = (client.oc.eval_js, client.oc.click_by,
-             client.login, client.goto_supplement, client.sleep_rand)
+             client.prepare_fetch_context, client.sleep_rand)
     client.oc.eval_js = harness.eval_js
     client.oc.click_by = harness.click_by
-    client.login = lambda session, **k: "sso_auto"
-    client.goto_supplement = lambda session, **k: "url"
+    client.prepare_fetch_context = lambda session, **k: "reuse_session"
     client.sleep_rand = lambda *a, **k: 0.0
     try:
         return client.fetch_round(session="s", pacing=(0.01, 0.02))
     finally:
         (client.oc.eval_js, client.oc.click_by,
-         client.login, client.goto_supplement, client.sleep_rand) = saved
+         client.prepare_fetch_context, client.sleep_rand) = saved
 
 
 def test_warning_page_only():

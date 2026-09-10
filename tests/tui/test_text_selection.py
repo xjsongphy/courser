@@ -225,6 +225,13 @@ async def test_filters_arrow_scroll_minimal_follow():
         assert app.fv.index == 49, "光标应停在最后一项，而非越出列表"
         assert float(sc.scroll_y) == float(sc.max_scroll_y), \
             "光标到末尾时筛选列表应最小跟随到底部"
+
+        # 重进筛选页会重置到 SEARCH/index=0；不能保留刚才的物理滚动位置，
+        # 否则逻辑焦点和 viewport 脱节，❯ 会被裁到屏幕外。
+        app._begin_filters()
+        await pilot.pause(0.1)
+        assert app.fv.focus == "search" and app.fv.index == 0
+        assert float(sc.scroll_y) == 0.0, "重置筛选焦点时应同步回到候选顶部"
     print("✓ 筛选页 ↑↓ 最小跟随：光标始终在真实 viewport 内")
 
 

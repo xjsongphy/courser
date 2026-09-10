@@ -27,6 +27,7 @@ Esc 取消；没有独立输入框。筛选页的搜索则直接输入即过滤�
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import time
 from datetime import datetime, timedelta
@@ -149,6 +150,8 @@ class CourserApp(App):
         # 空白区域使用终端自身的默认背景/调色板，不铺 Textual 深色主题底。
         super().__init__(ansi_color=True)
         self.cfg = cfg
+        self._shutting_down = False
+        self._shutdown_message: Optional[str] = None
         self.page = "main"
         self.log_buf: list[str] = []
         self.courses: list[Course] = []
@@ -213,7 +216,13 @@ class CourserApp(App):
             self._render_main_lite()
 
     def _thread_log(self, msg: str) -> None:
-        self.call_from_thread(self.log_line, msg)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self.log_line, msg)
+        except RuntimeError:
+            # 退出后事件循环已关闭；后台线程只需自行收尾，不能再等待 UI。
+            pass
 
     # ------------------------------------------------------------------
     # 状态文本（数据与排版分离：先取语义数据，再套统一原语）
@@ -937,7 +946,7 @@ class CourserApp(App):
         self.fv.gathering = True
         self.log_line("暂无最近抓取结果，自动抓取一轮以生成候选…")
         self._render_filters_list()
-        self._run_round()
+        self._request_round()
 
     def _on_gather_done(self) -> None:
         self.fv.gathering = False
@@ -1039,7 +1048,12 @@ class CourserApp(App):
             extra = " [dim](手动添加)[/]" if it not in cands else ""
             out.append(f"{cur} {mark} {ui_value(it)}{extra}")
         listw.update("\n".join(out))
-        self.call_after_refresh(self._scroll_filters_to_selection)
+        # 搜索框是这条纵向焦点链的起点。重进页面、切维度或改查询时会回到
+        # SEARCH/index=0；同时必须清掉上次浏览候选留下的物理 scroll_y，不能
+        # 只重置状态而让列表仍停在旧位置，把焦点标记裁到 viewport 外。
+        follow = (self._scroll_filters_to_selection if self.fv.focus == "list"
+                  else self._reset_filters_scroll)
+        self.call_after_refresh(follow)
 
     def _filters_hint(self) -> str:
         """只显示当前焦点真正可用的键，消除 Space 的二义性。"""
@@ -1075,6 +1089,14 @@ class CourserApp(App):
             1,
         )
         scroll.scroll_to_region(row, animate=False, force=True)
+
+    def _reset_filters_scroll(self) -> None:
+        """SEARCH 焦点时回到候选起点，令状态索引与真实 viewport 一致。"""
+        try:
+            scroll = self.query_one("#filtersscroll", FocusScroll)
+            scroll.scroll_to(y=0, animate=False, force=True, immediate=True)
+        except Exception:
+            pass
 
     def _filters_move(self, step: int) -> None:
         items = self._filters_items()
@@ -1416,10 +1438,10 @@ class CourserApp(App):
                  _shortcut_row("Ctrl+S", "保存"),
                  _shortcut_row("Esc", "放弃修改"), "",
                  ui_section("监控流程"),
-                 "  登出旧会话", "    → IAAA 登录", "    → 补退选",
+                 "  检查/复用已有会话", "    → 失效时 IAAA 登录", "    → 补退选",
                  "    → 动态读取所有页面", "    → 筛选空余课程",
                  "    → 邮件通知", "",
-                 ui_meta("每轮重新登录；遇验证码或风控提示时不会持续重试。"),
+                 ui_meta("默认复用有效会话；设置中开启“每轮强制重新登录”才会先登出。"),
                  "", ui_section("安全与节奏"),
                  "  轮询带随机抖动；发现风控或警告语会放慢节奏并提示。",
                  "  登录失败、验证码等错误会自动降速，不硬顶。",
@@ -1500,7 +1522,12 @@ class CourserApp(App):
     # 抓取进度（本轮步骤 + 当前操作实时提示）
     # ------------------------------------------------------------------
     def _thread_progress(self, done, total, op):
-        self.call_from_thread(self._set_progress, done, total, op)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self._set_progress, done, total, op)
+        except RuntimeError:
+            pass
 
     def _set_progress(self, done, total, op):
         self.prog.done, self.prog.total, self.prog.op = done, total, op
@@ -1553,6 +1580,8 @@ class CourserApp(App):
         anchor = ui_meta("• 状态")
         if w and w.running:
             status = ui_ok("监控中")
+        elif w and w.last_result and w.last_result.cancelled:
+            status = ui_warn("本轮已停止")
         elif w and w.last_result and not w.last_result.ok:
             status = ui_error("抓取失败")
         else:
@@ -1567,7 +1596,9 @@ class CourserApp(App):
         """底部唯一的全局 activity 行：抓取中 / 监控等待 / 空闲 — 互斥，只留一行。
         只在真有事件（抓取轮变化、开始/完成）时重绘，杜绝每秒周期刷新。"""
         w = self.watcher
-        if w and w.current_round_started_at is not None:
+        if self._shutdown_message:
+            line = f"{ui_meta('状态')}  {ui_warn(self._shutdown_message)}"
+        elif w and w.current_round_started_at is not None:
             line = self._activity_fetching(w)
         else:
             line = self._activity_steady(w)
@@ -1613,7 +1644,7 @@ class CourserApp(App):
         # q = 退出（筛选页里 q 是搜索字符，用 Esc 返回后 q 或 Ctrl+C 退出）
         if page != "filters" and k == "q":
             event.stop()
-            self.exit()
+            self.action_quit()
             return
 
         if page == "setup":
@@ -1721,7 +1752,7 @@ class CourserApp(App):
             self._toggle_monitor()
         elif k == "r":
             event.stop()
-            self._run_round()
+            self._request_round()
         elif k == "1":
             event.stop()
             self._set_view("all")
@@ -1745,7 +1776,7 @@ class CourserApp(App):
             self._show("help")
         elif k == "q":
             event.stop()
-            self.exit()
+            self.action_quit()
         elif k in ("/", "slash") and self.courses:
             event.stop()
             self._begin_search()
@@ -1847,7 +1878,7 @@ class CourserApp(App):
             self._finish_setup()
         elif k == "escape":
             event.stop()
-            self.exit()  # 首启 Esc = 退出程序
+            self.action_quit()  # 首启 Esc = 退出程序
 
     def _finish_setup(self) -> None:
         self.cfg.first_run_done = True
@@ -1980,11 +2011,21 @@ class CourserApp(App):
         w = self.watcher
         if w is None:
             return
-        self.log_line("手动触发一轮抓取…")
+        self._thread_log("手动触发一轮抓取…")
         w.run_round()
 
+    def _request_round(self) -> None:
+        """从 UI 线程发起抓取：先启动实时计时，再把整轮工作交给后台线程。"""
+        self._start_live_ticker()
+        self._run_round()
+
     def _on_round(self, r: RoundResult) -> None:
-        self.call_from_thread(self._apply_round, r)
+        if self._shutting_down:
+            return
+        try:
+            self.call_from_thread(self._apply_round, r)
+        except RuntimeError:
+            pass
 
     def _apply_round(self, r: RoundResult) -> None:
         # 本轮结束：清掉进行中的进度，避免残留"正在读取…"
@@ -2010,8 +2051,30 @@ class CourserApp(App):
             self.log_line(f"[green]已发送提醒邮件：{names}[/]")
 
     def on_unmount(self) -> None:
+        self._shutting_down = True
         if self.watcher:
             self.watcher.stop()
+
+    def action_quit(self) -> None:
+        """发起非阻塞退出；后台 I/O 收尾完成后再结束 TUI。"""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        self._shutdown_message = "收到取消请求…正在停止浏览器操作…"
+        self._render_runstate()
+        self.run_worker(self._quit_after_stop(), exclusive=True,
+                        name="courser-shutdown")
+
+    async def _quit_after_stop(self) -> None:
+        """在不阻塞 Textual 事件循环的情况下等待监控线程收尾。"""
+        if self.watcher:
+            # stop() 会 request_stop 后 join；放到线程池，避免冻结 TUI 及其退出提示。
+            await asyncio.to_thread(self.watcher.stop)
+        self._shutdown_message = "✓ 已停止"
+        self._render_runstate()
+        # 给 Textual 一个事件循环周期，确保最终状态能真正绘制出来。
+        await asyncio.sleep(0.05)
+        self.exit()
 
     @on(events.TextSelected)
     def _auto_copy_selection(self, event: events.TextSelected) -> None:

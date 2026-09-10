@@ -76,6 +76,7 @@ class FetchResult:
     login_mode: str = ""          # login_click / sso_auto
     ok: bool = True
     error: str = ""
+    cancelled: bool = False       # 用户主动停止本轮，不属于抓取故障
     warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
     warning_checked: bool = False  # 本轮是否真正进入了补退选页面、并读取了至少一页文本
                                  # （有观察风控警告的机会，才计入风控触发率分母）
@@ -100,6 +101,7 @@ class RoundResult:
     ts: float = 0.0
     ok: bool = True
     error: str = ""
+    cancelled: bool = False       # 用户主动停止本轮，不显示为抓取失败
     login_mode: str = ""
     pages: int = 0
     total: int = 0

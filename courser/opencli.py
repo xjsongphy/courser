@@ -13,16 +13,26 @@ opencli 的升级提示、代理警告等噪音输出在 stderr，不影响 stdo
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 import re
+import signal
 import subprocess
-from typing import Any, Optional
+import time
+from threading import Event
+from typing import Any, Iterator, Optional
 
 OPENCLI = os.environ.get("OPENCLI_BIN", "opencli")
 
 # 单条浏览器命令的超时（秒）；页面加载慢时可适当调大
 _CMD_TIMEOUT = int(os.environ.get("OPENCLI_CMD_TIMEOUT", "120"))
+
+# 一轮抓取运行在独立线程中；用 ContextVar 把该轮的取消信号透传给这一线程
+# 发出的每条 opencli 命令，而不需要让所有浏览器适配函数都新增 cancel 参数。
+_CANCEL_EVENT: ContextVar[Optional[Event]] = ContextVar(
+    "opencli_cancel_event", default=None)
 
 
 class OpenCliError(RuntimeError):
@@ -34,6 +44,83 @@ class OpenCliError(RuntimeError):
         self.stderr = stderr
         self.code = code
         super().__init__(f"opencli 命令失败 (exit={code}): {' '.join(cmd)}\nstderr: {stderr[-400:]}")
+
+
+class OpenCliCancelled(OpenCliError):
+    """当前抓取被要求停止；这是可预期的退出路径，不是浏览器故障。"""
+
+    def __init__(self, cmd: list[str]):
+        self.cmd = cmd
+        self.stdout = ""
+        self.stderr = ""
+        self.code = -1
+        RuntimeError.__init__(self, "抓取已取消，正在退出")
+
+
+@contextmanager
+def cancellation_scope(cancel_event: Event) -> Iterator[None]:
+    """让当前线程内的 opencli 调用响应 ``cancel_event``。"""
+    token = _CANCEL_EVENT.set(cancel_event)
+    try:
+        yield
+    finally:
+        _CANCEL_EVENT.reset(token)
+
+
+def _cancel_requested() -> bool:
+    event = _CANCEL_EVENT.get()
+    return event is not None and event.is_set()
+
+
+def _terminate(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """结束本次命令及其后代，并尽快收集管道输出。
+
+    每条命令都在自己的进程组/会话中启动，所以不会误伤已运行的 Chrome
+    daemon；只会处理本次 ``opencli browser`` 拉起的子树。
+    """
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (AttributeError, OSError, ProcessLookupError):
+            pass
+    else:
+        # CREATE_NEW_PROCESS_GROUP 允许向本次命令组发送 Ctrl+Break。它比直接
+        # TerminateProcess 更利于 Node/opencli 正常收尾；无控制台时会失败，随后
+        # 的 taskkill /T 会可靠地清掉仍存活的整棵子树。
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        except (AttributeError, OSError):
+            pass
+    try:
+        out, err = proc.communicate(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (AttributeError, OSError, ProcessLookupError):
+                proc.kill()
+        else:
+            pid = getattr(proc, "pid", None)
+            if pid is not None:
+                # /T 只追踪这个 Popen 所创建的后代，不会碰到外部 daemon。
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=2.0,
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+            # taskkill 失败时仍保证主命令不会继续占住 communicate；成功时这里
+            # 只会得到 ProcessLookupError。
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        out, err = proc.communicate()
+    return out or "", err or ""
 
 
 def _sanitize_env():
@@ -48,14 +135,35 @@ def _run(session: str, args: list[str], window: Optional[str] = None,
     cmd = [OPENCLI, "browser", session, *args]
     if window:
         cmd += ["--window", window]
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
+    if _cancel_requested():
+        raise OpenCliCancelled(cmd)
+    popen_kwargs: dict[str, Any] = dict(
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout or _CMD_TIMEOUT,
         env=_sanitize_env(),
     )
-    out, err = proc.stdout or "", proc.stderr or ""
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    timeout_s = timeout or _CMD_TIMEOUT
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if _cancel_requested():
+            _terminate(proc)
+            raise OpenCliCancelled(cmd)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate(proc)
+            raise subprocess.TimeoutExpired(cmd, timeout_s)
+        try:
+            out, err = proc.communicate(timeout=min(0.2, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    out, err = out or "", err or ""
     if proc.returncode != 0:
         raise OpenCliError(cmd, out, err, proc.returncode)
     return out, err

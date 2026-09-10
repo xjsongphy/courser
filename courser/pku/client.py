@@ -4,9 +4,10 @@
 也不负责筛选/通知（那是 runner 的事）。它只依赖：
     opencli 适配器（真实浏览器交互）、parser（纯转换）、extract（注入 JS）、human（节奏）。
 
-流程（每一轮监控都会完整执行）：
-1. 退出旧会话（logout.do，best-effort）
-2. 打开 IAAA OAuth 登录页；填凭据或等密码管理器自动填充，点登录
+流程（每一轮监控都会执行）：
+1. 默认先检查当前浏览器会话；有效则直接复用
+2. 会话失效时打开 IAAA OAuth 登录页；填凭据或等密码管理器自动填充，点登录
+   - 开启 force_relogin 时，才会先退出旧会话再登录
    - 不做验证码输入；出现验证码/错误 → 抛 LoginError，由上层降速暂停
 3. 点击菜单「补退选」进入补退选页
 4. 动态翻页（每次解析 "Page X of Y" 分页器，不固定页数），逐页只读提取可用课程
@@ -137,6 +138,28 @@ def _login_error_text(session: str) -> str:
 # ---------------------------------------------------------------------------
 # 登录
 # ---------------------------------------------------------------------------
+
+def ensure_login(session: str, creds: Optional[dict] = None,
+                 window: Optional[str] = None, force_relogin: bool = False,
+                 log: Optional[Callable[[str], None]] = None,
+                 prog: Optional[Progress] = None) -> str:
+    """确保可用登录态：默认复用当前会话，失效时才走登录流程。
+
+    ``force_relogin`` 是显式的例外：用于账号切换或排障时，每轮先登出再登录。
+    """
+    if not force_relogin:
+        if prog:
+            prog.step("检查现有登录状态…")
+        if _on_workable_page(session):
+            if log:
+                log("已检测到有效 PKU 登录状态，复用当前会话")
+            if prog:
+                prog.step("已复用现有登录会话")
+            return "reuse_session"
+        if log:
+            log("未检测到有效登录状态，进入登录流程")
+    return login(session, creds=creds, window=window,
+                 force_logout=force_relogin, log=log, prog=prog)
 
 def _form_present(session: str) -> bool:
     """登录表单是否在位（#logon_button 存在）。页面重定向进行中时可能短暂缺失。"""
@@ -481,6 +504,89 @@ def goto_supplement(session: str, window: Optional[str] = None,
     raise FetchError(f"点击「补退选」后页面未变化，当前 url={oc.get_url(session)}")
 
 
+_PAGER_PAGE_JS = (
+    r"(() => { const m = (document.body.innerText || '').match("
+    r"/Page\s+(\d+)\s+of\s+(\d+)/i); return m ? +m[1] : null; })()"
+)
+
+
+def _supplement_page_number(session: str) -> Optional[int]:
+    """返回补退选列表当前页；页面尚未渲染分页器时返回 ``None``。"""
+    try:
+        value = oc.eval_js(session, _PAGER_PAGE_JS)
+    except Exception:
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def reset_supplement_to_first_page(session: str,
+                                   log: Optional[Callable[[str], None]] = None,
+                                   prog: Optional[Progress] = None) -> None:
+    """复用会话时，将上轮停留的补退选分页复位到第一页。
+
+    不能仅靠 ``goto_supplement``：若当前已经是 SupplyCancel 页面，它会正确地
+    原地返回，但页面可能正停在最后一页。这里用分页器自身的 First/1 链接复位，
+    不拼接 URL，也不绕过网站正常的翻页流程。
+    """
+    current = _supplement_page_number(session)
+    if current is None or current <= 1:
+        return
+    if log:
+        log(f"检测到补退选列表停在第 {current} 页，正在返回第 1 页")
+    if prog:
+        prog.step("补退选列表返回第 1 页")
+
+    # 北大旧选课页的分页器使用英文 First；部分皮肤只提供数字页码，因此回退
+    # 到精确名称 "1"。两者均由 opencli 的可访问性定位点击，不直接构造分页 URL。
+    for name in ("First", "1"):
+        try:
+            clicked = oc.click_by(session, role="link", name=name)
+        except Exception:
+            clicked = False
+        if not clicked:
+            continue
+        for _ in range(8):
+            sleep_rand(0.4, 0.8)
+            page = _supplement_page_number(session)
+            if page == 1:
+                if log:
+                    log("补退选列表已回到第 1 页")
+                return
+
+    # 不允许把最后一页当成“只有一页”后静默成功，否则监控结果会不完整。
+    page = _supplement_page_number(session)
+    raise FetchError(f"补退选列表无法回到第 1 页（当前第 {page or '?'} 页）")
+
+
+def prepare_fetch_context(session: str, creds: Optional[dict] = None,
+                          window: Optional[str] = None,
+                          force_relogin: bool = False,
+                          log: Optional[Callable[[str], None]] = None,
+                          prog: Optional[Progress] = None) -> str:
+    """准备一轮抓取的工作上下文，并返回本轮登录方式。
+
+    这里集中维护抓取前的不变量：已认证、位于补退选页面、分页从第 1 页开始。
+    ``walk_pages`` 因此只负责读取和翻页，不再隐含假设浏览器当前停留位置。
+    """
+    login_mode = ensure_login(
+        session, creds=creds, window=window,
+        force_relogin=force_relogin, log=log, prog=prog)
+    if log:
+        mode_label = "复用已有会话" if login_mode == "reuse_session" else "重新登录"
+        log(f"抓取准备：登录状态={mode_label}")
+
+    supplement_url = goto_supplement(
+        session, window=window, log=log, prog=prog)
+    if log:
+        log(f"抓取准备：补退选页面={supplement_url}")
+
+    reset_supplement_to_first_page(session, log=log, prog=prog)
+    if log:
+        page = _supplement_page_number(session)
+        log(f"抓取准备：当前页={page if page is not None else '未知'}")
+    return login_mode
+
+
 # ---------------------------------------------------------------------------
 # 动态翻页抓取（仅可用列表）
 # ---------------------------------------------------------------------------
@@ -607,13 +713,17 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     prog = Progress(on_progress) if on_progress else None
     obs: dict = {}
     try:
-        result.login_mode = login(session, creds=creds, window=window,
-                                  force_logout=force_logout, log=log, prog=prog)
-        goto_supplement(session, window=window, log=log, prog=prog)
+        result.login_mode = prepare_fetch_context(
+            session, creds=creds, window=window,
+            force_relogin=force_logout, log=log, prog=prog)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
                                           log=log, prog=prog, obs=obs)
         result.pages = meta.get("pages", 0)
         result.warning_hit = bool(meta.get("warning_hit"))
+    except oc.OpenCliCancelled as exc:
+        result.ok = False
+        result.cancelled = True
+        result.error = str(exc)
     except (FetchError, oc.OpenCliError) as exc:
         result.ok = False
         result.error = str(exc)

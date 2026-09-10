@@ -45,8 +45,10 @@ class MonitorScheduler:
         self.next_round_ts: Optional[float] = None
 
     # -- 转发给 runner --------------------------------------------------
-    def run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
-        return self.runner.run_round(fetch_round=fetch_round)
+    def run_round(self, fetch_round: Optional[Callable] = None,
+                  cancel_event: Optional[threading.Event] = None) -> RoundResult:
+        return self.runner.run_round(fetch_round=fetch_round,
+                                     cancel_event=cancel_event)
 
     @property
     def last_result(self) -> Optional[RoundResult]:
@@ -64,7 +66,7 @@ class MonitorScheduler:
     def _loop(self) -> None:
         self.running = True
         while not self._stop.is_set():
-            self.run_round()
+            self.run_round(cancel_event=self._stop)
             if self._stop.is_set():
                 break
             base = self.cfg.interval_min * 60
@@ -91,10 +93,15 @@ class MonitorScheduler:
         self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        self.request_stop()
         if self._thread:
             self._thread.join(timeout=5)
         self.running = False
+
+    def request_stop(self) -> None:
+        """立即发出停止信号；调用方可选择稍后再 join 后台线程。"""
+        self._stop.set()
+        self.runner.cancel_current_round()
 
     @property
     def countdown_s(self) -> Optional[int]:

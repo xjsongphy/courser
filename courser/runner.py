@@ -17,6 +17,7 @@ import time
 from typing import Callable, Optional
 
 from . import notifier
+from . import opencli
 from .filters import FilterSet
 from .models import Course, FetchResult, RoundResult
 from .pku import client
@@ -42,7 +43,9 @@ class RoundRunner:
         self.notify_store = notify_store or NotificationStateStore()
         self.budget_store = budget_store or SendBudgetStore()
         self._round_lock = threading.Lock()
+        self._cancel_lock = threading.Lock()
         self._notify_lock = threading.Lock()
+        self._active_cancel: Optional[threading.Event] = None
         self.last_result: Optional[RoundResult] = None
         self.current_round_started_at: Optional[float] = None  # 用于「本轮已用时」实时显示
 
@@ -88,16 +91,39 @@ class RoundRunner:
         if fr.warning_checked:
             self.risk.record(fr.warning_hit)
 
+    def cancel_current_round(self) -> None:
+        """请求停止正在进行的一轮；不会影响未来新启动的轮次。"""
+        with self._cancel_lock:
+            if self._active_cancel is not None:
+                self._active_cancel.set()
+
     # -- 一轮 ------------------------------------------------------------
-    def run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
+    def run_round(self, fetch_round: Optional[Callable] = None,
+                  cancel_event: Optional[threading.Event] = None) -> RoundResult:
         with self._round_lock:  # 手动触发一轮与定时轮询互斥
+            # 调度器传入它自己的停止事件，消除「刚准备开始一轮时收到 stop」的竞态；
+            # 手动抓取则拥有独立事件，只取消当前这一轮。
+            cancel_event = cancel_event or threading.Event()
+            with self._cancel_lock:
+                self._active_cancel = cancel_event
             self.current_round_started_at = time.time()
             try:
-                return self._run_round(fetch_round=fetch_round)
+                with opencli.cancellation_scope(cancel_event):
+                    result = self._run_round(fetch_round=fetch_round,
+                                             cancel_event=cancel_event)
             finally:
+                # 先结束“进行中”状态，再通知 UI；否则 UI 回调可能把“本轮完成”
+                # 渲染成仍在抓取，且计时器停止后没有下一次刷新机会。
                 self.current_round_started_at = None
+                with self._cancel_lock:
+                    if self._active_cancel is cancel_event:
+                        self._active_cancel = None
+            self.last_result = result
+            self.on_round(result)
+            return result
 
-    def _run_round(self, fetch_round: Optional[Callable] = None) -> RoundResult:
+    def _run_round(self, fetch_round: Optional[Callable] = None,
+                   cancel_event: Optional[threading.Event] = None) -> RoundResult:
         """执行完整一轮。fetch_round 可注入（默认真抓取），便于测试。"""
         fetch_round = fetch_round or client.fetch_round
         r = RoundResult(ts=time.time())
@@ -122,7 +148,7 @@ class RoundRunner:
             # 但「登录未成功」是确定性失败（账号被拒/会话已失效/填值未触发框架），
             # 原地重试只会重复一整轮慢登录（约 1~3 分钟）纯浪费 —— 不原地重试，
             # 交给下一轮调度重试，并明确提示人工处理。
-            if not fr.ok and not fr.warning_hit:
+            if not fr.ok and not fr.warning_hit and not fr.cancelled:
                 if fr.error.startswith("登录未成功"):
                     self.log("本轮失败：登录未成功。重试无法解决账号/登录问题，"
                              "本轮不原地重试；请检查配置的学号/密码，或先在 Chrome 手动登录"
@@ -133,7 +159,9 @@ class RoundRunner:
                              f"秒后重试一次…")
                     if _prog:
                         _prog(0, None, "本轮失败，等待片刻后重试…")
-                    time.sleep(random.uniform(*self.retry_delay_range))
+                    if cancel_event and cancel_event.wait(
+                            random.uniform(*self.retry_delay_range)):
+                        raise opencli.OpenCliCancelled(["courser", "retry"])
                     fr = fetch_round(
                         session=self.cfg.session,
                         creds=creds,
@@ -149,6 +177,7 @@ class RoundRunner:
             r.pages = fr.pages
             r.total = len(fr.courses)
             r.courses = fr.courses
+            r.cancelled = fr.cancelled
             r.warning_hit = fr.warning_hit
             if fr.warning_hit:
                 self.log("⚠ 检测到「请勿使用刷课机」类警告")
@@ -160,7 +189,11 @@ class RoundRunner:
             r.risk_hits = hits
             r.risk_total = total
 
-            if not fr.ok:
+            if fr.cancelled:
+                r.ok = False
+                r.error = fr.error
+                self.log("本轮已停止（用户取消）")
+            elif not fr.ok:
                 r.ok = False
                 r.error = fr.error
                 self.log(f"✗ 本轮失败：{fr.error}")
@@ -188,6 +221,11 @@ class RoundRunner:
                          f"触发率 {r.risk_percent}%")
                 if r.warning_hit:
                     self.log("下一轮已自动放慢至约 4× 间隔")
+        except opencli.OpenCliCancelled as exc:
+            r.ok = False
+            r.cancelled = True
+            r.error = str(exc)
+            self.log("本轮已停止（用户取消）")
         except Exception as exc:  # noqa: BLE001
             r.ok = False
             r.error = str(exc)
@@ -195,6 +233,4 @@ class RoundRunner:
 
         r.duration_s = time.time() - t0
         r.ts = time.time()
-        self.last_result = r
-        self.on_round(r)
         return r
