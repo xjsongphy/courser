@@ -245,18 +245,18 @@ async def main() -> int:
         await p.pause(0.3)
         assert app.page == "setup", f"首次启动应在设置向导页，实际 {app.page}"
         _assert_no_gui_widgets(app)
-        await p.press("down")
+        await p.press("enter")
         await p.pause(0.1)
         assert app.editing.context == "setup" and app.editor.active, \
-            "↓ 应进入收件邮箱行内编辑"
+            "Enter 应进入收件邮箱行内编辑"
         app.editor.begin("me@example.com", "text")
         app._render_setup()
         await p.press("enter")
         await p.pause(0.1)
         assert app.cfg.notify.to == "me@example.com", "收件邮箱应写入"
-        await p.press("enter")
+        await p.press("ctrl+s")
         await p.pause(0.2)
-        assert app.page == "main", f"就绪回车应进入主页，实际 {app.page}"
+        assert app.page == "main", f"就绪 Ctrl+S 应进入主页，实际 {app.page}"
         assert app.cfg.first_run_done, "完成首启应置 first_run_done"
         _assert_no_gui_widgets(app)
         await p.press("q")

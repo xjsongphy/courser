@@ -167,9 +167,9 @@ async def main() -> int:
         body, _, runstate_height, runstate_text, hero_text = await _render_at(w, h)
         assert runstate_height >= 1, f"{w}×{h} 状态栏正文被边框挤没"
         assert "未开始" in runstate_text, f"{w}×{h} 状态栏未渲染"
-        # 底部只放实时活动（Gmail/历史数据已归顶部稳定摘要）
-        assert "gmail" not in runstate_text, f"{w}×{h} 状态栏不应再显示 Gmail"
-        assert "gmail" in hero_text.lower(), f"{w}×{h} hero 里应有发件通道 gmail"
+        # 底部只放实时活动（历史数据已归顶部稳定摘要）
+        assert "gmail" not in runstate_text.lower(), f"{w}×{h} 状态栏不应再显示 Gmail"
+        assert "上次发信" in hero_text, f"{w}×{h} hero 里应有上次发信通道"
         lines = [ln for ln in body.splitlines() if ln.strip()]
         assert lines, f"{w}×{h} 无渲染结果"
         assert len(lines) >= 2, f"{w}×{h} 至少应有表头+数据行"

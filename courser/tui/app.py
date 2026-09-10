@@ -4,7 +4,7 @@
 常态下只呈现当前状态、关注的课程与最近一次事件；所有配置都通过少量二级页面
 完成。页面用线条边框面板分区，配色克制（统一原语见 courser/tui/theme.py）。
 
-主页分三层，职责不重叠：顶部 Hero 稳定摘要（产品身份 + 筛选/通知/Gmail 最近
+主页分三层，职责不重叠：顶部 Hero 稳定摘要（产品身份 + 筛选/通知/上次发信/最近
 发送/最近抓取/数据规模），中部课程列表，底部一行实时活动状态。底部在抓取/监控
 进行中每秒刷新（已用秒数实走），空闲不重绘；用自调度 timer，绝不 set_interval。
 
@@ -77,7 +77,7 @@ _field_mutate = field_mutate
 # 全局活动状态栏（底部唯一 activity 行）展示的页面；其它页面隐掉，正文各自负责。
 _ACTIVITY_PAGES = {"main", "filters", "settings", "logs", "detail"}
 # 全局底部操作栏（#keys）展示的页面：与 activity 同，都是有稳定底部操作提示的页面。
-_KEYS_PAGES = {"main", "filters", "settings", "logs", "detail"}
+_KEYS_PAGES = {"main", "filters", "settings", "logs", "detail", "setup"}
 
 def _compact_dt(dt: datetime) -> str:
     """把时间压成随年龄递减的紧凑格式：今天 HH:MM；昨天 "昨天 HH:MM"；
@@ -176,6 +176,9 @@ class CourserApp(App):
         self._detail_course: Optional[Course] = None
         self._f_backup = None
         self._live_timer: Optional[object] = None   # 底部实时刷新的自调度 timer
+        # gws 授权状态（首发页展示）：None=尚未探测完(检查中)；对象于后台线程探测后写入
+        self._gws_status: Optional[object] = None
+        self._gws_auth_probing = False
         self._init_rows()
         self._load_snapshot()
 
@@ -261,9 +264,10 @@ class CourserApp(App):
             return ui_warn("收件邮箱未填写")
         return ui_ok("已配置")
 
-    def _gmail_last_status_markup(self) -> str:
-        """「Gmail」= 最近一次真实发信结果（稳定事实，不进底部状态行）。
-        未发过→一条连续横线（灰，中性）/ 成功（绿）/ 失败（红）。"""
+    def _last_send_markup(self) -> str:
+        """「上次发信」= 最近一次真实发信结果（稳定事实，不进底部状态行）。
+        未发过→一条连续横线（灰，中性）/ 成功（绿）/ 失败（红）。
+        注意：它表示'上次发信'，不是 Gmail 登录状态；授权状态在首发页/设置页呈现。"""
         ok, _ts = notifier.last_mail_status()
         if ok is None:
             return ui_meta("──")
@@ -585,7 +589,6 @@ class CourserApp(App):
         "logs": _page_hint("↑↓ / PgUp / PgDn 滚动 · Esc 返回"),
         "help": _page_hint(),
         "detail": _page_hint("Esc 返回"),
-        "setup": _page_hint("↓ 编辑收件邮箱 · 回车 继续 · Esc 退出程序"),
     }
 
     def _page_ids(self):
@@ -616,6 +619,7 @@ class CourserApp(App):
             self._anchor_focus()
         elif page == "setup":
             self._render_setup()
+            self._start_gws_auth_probe()
             self._anchor_focus()
         else:
             self._anchor_focus()
@@ -624,6 +628,8 @@ class CourserApp(App):
         keys.display = page in _KEYS_PAGES
         if page == "main":
             keys.update(self._main_hint())
+        elif page == "setup":
+            keys.update(self._setup_hint())
         elif page == "settings":
             keys.update(self._settings_hint())
         elif page == "filters":
@@ -726,7 +732,7 @@ class CourserApp(App):
         left_rows = [
             ("筛选", self._filter_summary()),
             ("通知", self._notify_ready_markup()),
-            ("Gmail", self._gmail_last_status_markup()),
+            ("上次发信", self._last_send_markup()),
         ]
         right_rows = [
             ("最近抓取", ui_value(t) if t else ui_meta("—")),
@@ -736,7 +742,7 @@ class CourserApp(App):
         left = self._hero_kv_grid(left_rows)
         right = self._hero_kv_grid(right_rows)
 
-        # 两栏：左侧 3 行 > 右侧 2 行，分隔竖线按左列行数画到底（含 Gmail 行）
+        # 两栏：左侧 3 行 > 右侧 2 行，分隔竖线按左列行数画到底（含 上次发信 行）
         two = Table.grid(expand=True)
         two.add_column(ratio=1)
         two.add_column(width=_HERO_SEP)   # 左右两栏之间的分隔区：竖线 + 间距
@@ -1263,6 +1269,17 @@ class CourserApp(App):
         parts += [("Enter", "编辑/执行"), ("Ctrl+S", "保存"), ("Esc", "放弃")]
         return _hint(*parts)
 
+    def _setup_hint(self) -> str:
+        """首启设置页底部操作栏：非编辑态 Enter=编辑邮箱、Ctrl+S=保存并继续；
+        编辑态则走统一的行内编辑键位（_EDIT_HINT）。"""
+        if self.editing.context == "setup":
+            return self._EDIT_HINT
+        return _hint(
+            ("Enter", "编辑邮箱"),
+            ("Ctrl+S", "保存并继续"),
+            ("Esc", "退出程序"),
+        )
+
     def _scroll_settings_to_selection(self) -> None:
         """↑↓ 移动设置项时保持选中行可见，但**不把滚动条钉到顶部**：交给 Textual 的
         scroll_to_region 做最小必要滚动（选中行已在真实 viewport 内则完全不动）。
@@ -1490,9 +1507,19 @@ class CourserApp(App):
         lines.append("  " + ("[green]✓[/] gws 已安装"
                              if gws else f"[red]✗[/] gws 未安装（{notifier.GWS_INSTALL_COMMAND}）"))
         if gws:
-            lines.append("  [yellow]⚠[/] gws 尚未配置授权：请先在命令行执行 "
-                         f"{notifier.GWS_SETUP_COMMAND}（一次性），"
-                         f"再执行 {notifier.GWS_LOGIN_COMMAND}")
+            st = self._gws_status  # None = 尚未探测完（显示检查中）
+            if st is None:
+                lines.append("  [cyan]…[/] 正在检查 gws 授权状态…")
+            elif st.auth == "ready":
+                acc = f"（{st.account}）" if st.account else ""
+                lines.append(f"  [green]✓[/] gws 已授权{acc}")
+            elif st.auth == "invalid":
+                lines.append(f"  [yellow]⚠[/] gws token 已失效：请执行 {notifier.GWS_LOGIN_COMMAND}")
+            elif st.auth == "missing":
+                lines.append(f"  [yellow]⚠[/] gws 尚未授权：请执行 {notifier.GWS_SETUP_COMMAND}（一次性），"
+                             f"再执行 {notifier.GWS_LOGIN_COMMAND}")
+            else:
+                lines.append("  [yellow]⚠[/] 无法检测 gws 授权状态（请执行 gws auth status 查看）")
         lines.extend(["", ui_section("收件邮箱"), ui_meta("用于接收提醒，必填")])
         if self.editing.context == "setup" and self.editing.key == "to":
             lines.append(_kv_row("邮箱", self.editor.markup(), width=12, prefix="❯ "))
@@ -1501,7 +1528,7 @@ class CourserApp(App):
                 lines.append(_kv_row("邮箱", ui_value(self.cfg.notify.to), width=12, prefix="❯ "))
             else:
                 lines.append(_kv_row("邮箱", ui_warn("未填写"), width=12, prefix="❯ "))
-            lines.append("  " + ui_meta("按 ↓ 或 回车 编辑收件邮箱"))
+            lines.append("  " + ui_meta("回车 编辑收件邮箱 · Ctrl+S 保存并继续"))
         lines.append("")
         lines.append(ui_meta("学号 / 密码可留空：登录时由浏览器密码管理器自动填充。"))
         lines.append(ui_meta("也可稍后在主页按 s，在「设置 → 账号」中补充。"))
@@ -1510,14 +1537,46 @@ class CourserApp(App):
             lines.append(ui_ok("收件邮箱已配置，可以开始使用。"))
         else:
             lines.append(ui_warn("请先填写收件邮箱。"))
-        lines.extend(["", _page_hint("↓ 编辑收件邮箱 · 回车 继续 · Esc 退出程序")])
         body.update("\n".join(lines))
+        # 底部操作栏与编辑态同步（编辑=_EDIT_HINT，否则=_setup_hint）
+        try:
+            self.query_one("#keys", Static).update(self._setup_hint())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 首启设置：收件邮箱同样用 FieldEditor 行内编辑（与设置页同一套代码）
     # ------------------------------------------------------------------
     def _setup_edit_email(self) -> None:
         self._begin_field("setup", "to", "text", self.cfg.notify.to)
+
+    # -- gws 授权状态：后台线程探测 + 缓存，不阻塞渲染 -------------------
+    def _start_gws_auth_probe(self) -> None:
+        """异步探测 gws 授权状态（run_in_executor + 缓存）。
+        未安装则不探测；同一时刻不重复起线程。"""
+        if not notifier.gws_available():
+            return
+        if self._gws_auth_probing:
+            return
+        self._gws_status = None          # 置 None 让正文显示“检查中”
+        self._gws_auth_probing = True
+        try:
+            self.run_worker(self._gws_auth_worker(), name="courser-gws-auth")
+        except Exception:
+            self._gws_auth_probing = False
+
+    async def _gws_auth_worker(self) -> None:
+        try:
+            self._gws_status = await asyncio.to_thread(notifier.gws_auth_status_cached)
+        except Exception:
+            self._gws_status = notifier.GwsStatus(auth="unknown")
+        finally:
+            self._gws_auth_probing = False
+        if self.page == "setup":
+            try:
+                self._render_setup()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 抓取进度（本轮步骤 + 当前操作实时提示）
@@ -1576,7 +1635,7 @@ class CourserApp(App):
 
     def _activity_steady(self, w) -> str:
         """监控等待 / 空闲（含失败）（实时活动）：• 状态 <状态> │ 下一轮 <时刻>。
-        历史事实（最近抓取/数据/Gmail 上次发送）一律归顶部稳定摘要，底部只回答
+        历史事实（最近抓取/数据/上次发信）一律归顶部稳定摘要，底部只回答
         程序现在在干什么。"""
         anchor = ui_meta("• 状态")
         if w and w.running:
@@ -1866,11 +1925,11 @@ class CourserApp(App):
             self._render_main(force=True)
 
     def _setup_key(self, k: str, event: events.Key) -> None:
-        if k == "down":
+        # 配置表单统一约定：Enter=当前项局部动作（编辑），Ctrl+S=保存整页，Esc=放弃/退出
+        if k == "enter":
             event.stop()
-            self._setup_edit_email()   # ↓ = 编辑收件邮箱（行内）
-            return
-        if k in ("enter", " "):
+            self._setup_edit_email()
+        elif k == "ctrl+s":
             event.stop()
             if not self.cfg.notify.to:
                 self.log_line("请先填写收件邮箱")
