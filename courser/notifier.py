@@ -4,7 +4,8 @@ gws = https://github.com/googleworkspace/cli（npm 包 @googleworkspace/cli）�
 安装并完成授权：
 
     npm install -g @googleworkspace/cli
-    gws auth login        # 浏览器完成 OAuth2 授权
+    gws auth setup          # 首次：初始化 Google Cloud 项目 / OAuth 配置 / 启用 API
+    gws auth login          # 首次及后续：浏览器完成 OAuth2 授权
 
 本模块组装 RFC822 邮件 → base64url → 调 Gmail API users.messages.send。
 不依赖 smtplib，也不要求填写 SMTP 密码；发件账号由 gws 认证账号提供
@@ -27,7 +28,11 @@ from .course_table import column, course_display, ordered_courses, seats_display
 
 _GWS = "gws"
 GWS_INSTALL_COMMAND = "npm install -g @googleworkspace/cli"
-_AUTH_HINT = ("请先配置 gws：安装 googleworkspace/cli 并执行 `gws auth login` 完成授权；"
+GWS_SETUP_COMMAND = "gws auth setup"      # 一次性：初始化项目/OAuth/启用 API
+GWS_LOGIN_COMMAND = "gws auth login"      # 首次及后续：浏览器授权 Gmail
+AUTH_STEPS = f"{GWS_SETUP_COMMAND}，再执行 {GWS_LOGIN_COMMAND}"
+_AUTH_HINT = (f"请先配置 gws：安装 {GWS_INSTALL_COMMAND}，然后执行 {AUTH_STEPS} 完成授权；"
+              f"（token 失效时重新执行 {GWS_LOGIN_COMMAND}）"
               "然后在 courser「设置」中填写 收件邮箱（gws 发件账号可选）。")
 
 # 最近一次发信结果（用于 TUI 展示 Google/邮件连通性）
@@ -92,7 +97,7 @@ def send_email(notify: Notify, subject: str, body: str,
             return True
         if log:
             log(f"gws 发送失败（exit={proc.returncode}）：{err[:300] or out[:300]}\n"
-                f"若提示未授权，请执行：gws auth login")
+                f"若提示未授权，请执行：{GWS_LOGIN_COMMAND}")
         return False
     except Exception as exc:  # noqa: BLE001
         if log:

@@ -100,7 +100,7 @@ SETTINGS_FIELDS: list[tuple[str, list[dict]]] = [
         {"key": "username", "label": "学号", "kind": "text"},
         {"key": "password", "label": "密码", "kind": "password"},
     ]),
-    ("邮件通知（gws 发送，需先 `gws auth login` 授权）", [
+    ("邮件通知（gws 发送，需先 `gws auth setup` 后 `gws auth login` 授权）", [
         {"key": "to", "label": "收件邮箱", "kind": "text"},
         {"key": "gws_from", "label": "gws 发件账号", "kind": "text"},
         {"key": "max_per_hour", "label": "每小时最多发送", "kind": "int"},

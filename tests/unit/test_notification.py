@@ -67,7 +67,14 @@ def test_failure_branches():
 
 def test_gws_install_hint():
     assert notifier.GWS_INSTALL_COMMAND == "npm install -g @googleworkspace/cli"
+    assert notifier.GWS_SETUP_COMMAND == "gws auth setup"
+    assert notifier.GWS_LOGIN_COMMAND == "gws auth login"
     assert "brew" not in notifier._AUTH_HINT.lower()
+    # 安装流程闭环：首次必须走 setup→login，不能退化成单独提示 gws auth login
+    assert "gws auth setup" in notifier._AUTH_HINT
+    assert notifier.AUTH_STEPS.startswith(notifier.GWS_SETUP_COMMAND), \
+        "首次授权应引导先 gws auth setup 再 gws auth login"
+    assert notifier.GWS_LOGIN_COMMAND in notifier._AUTH_HINT
 
 
 def test_send_and_profile():

@@ -40,7 +40,8 @@ class Credentials:
 
 @dataclass
 class Notify:
-    """邮件通知（通过 gws = Google Workspace CLI 发送，需用户自行安装并 gws auth login）。"""
+    """邮件通知（通过 gws = Google Workspace CLI 发送，需用户自行安装，
+    首次 `gws auth setup` 后 `gws auth login` 授权）。"""
 
     to: str = ""                       # 收件人邮箱（提醒的目标地址，TUI 设置 / MAIL_TO 提供）
     gws_from: str = ""                 # gws 发件账号（Gmail 地址，可选；默认取认证账号）

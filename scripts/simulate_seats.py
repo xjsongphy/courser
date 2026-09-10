@@ -6,7 +6,8 @@
 用法：
     uv run python scripts/simulate_seats.py
 
-注意：需要 gws 已授权（gws auth login）；未授权时本脚本会在发送步骤给出明确提示。
+注意：需要 gws 已授权（首次 `gws auth setup` 后 `gws auth login`）；
+未授权时本脚本会在发送步骤给出明确提示。
 """
 
 from __future__ import annotations
