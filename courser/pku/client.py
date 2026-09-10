@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from .. import opencli as oc
 from ..human import sleep_rand
 from ..models import Course, FetchError, FetchResult, LoginError
-from .extract import EXTRACT_JS, TABLE_READY_JS
+from .extract import EXTRACT_JS, PAGE_STATE_JS
 from . import parser
 
 LOGIN_URL = (
@@ -57,26 +57,43 @@ class Progress:
 
 
 # ---------------------------------------------------------------------------
-# 页面在位检测 / 等待
+# 页面在位检测 / 等待（三态）
 # ---------------------------------------------------------------------------
 
-def _table_ready(session: str) -> bool:
-    """课程表是否已渲染出来（页面加载未完成时抓取会拿到空数据）。"""
+PAGE_TABLE = "table"      # 课程表已就绪，可以正常提取
+PAGE_WARNING = "warning"  # 明确命中风控阻断页（课程表消失 + 警告文案）
+PAGE_TIMEOUT = "timeout"  # 既无课程表也无明确警告：无法确定状态
+
+
+def _page_state(session: str) -> tuple[bool, bool]:
+    """返回 (课程表就绪, 明确风控警告)。eval 异常按未就绪处理。"""
     try:
-        return oc.eval_js(session, TABLE_READY_JS) is True
+        r = oc.eval_js(session, PAGE_STATE_JS)
+        if isinstance(r, dict):
+            return bool(r.get("ready")), bool(r.get("warning"))
     except Exception:
-        return False
+        pass
+    return False, False
 
 
-def _wait_table(session: str, timeout_s: float = 20.0,
-                log: Optional[Callable[[str], None]] = None) -> bool:
-    """等到课程表出现；超时返回 False。"""
+def _wait_page_state(session: str, timeout_s: float = 20.0,
+                     log: Optional[Callable[[str], None]] = None) -> str:
+    """等页面进入一种确定状态：课程表就绪 / 明确风控警告 / 超时。
+
+    返回 PAGE_TABLE / PAGE_WARNING / PAGE_TIMEOUT。
+    关键：既等课程表出现，也等**阻断性风控警告**出现。风控页会把课程表替换掉，
+    若只等课程表会一直等到超时而被误判成"0 页正常完成"（漏报甚至反向记 false）。
+    超时（既无课程表也无明确警告）视为“不知道发生了什么”，不计入风控样本。
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        if _table_ready(session):
-            return True
+        ready, warned = _page_state(session)
+        if ready:
+            return PAGE_TABLE
+        if warned:
+            return PAGE_WARNING
         sleep_rand(0.5, 1.0)
-    return False
+    return PAGE_TIMEOUT
 
 
 def _on_workable_page(session: str) -> bool:
@@ -472,28 +489,40 @@ def walk_pages(session: str, window: Optional[str] = None,
                pacing: tuple[float, float] = (0.8, 2.0),
                max_pages: int = 100,
                log: Optional[Callable[[str], None]] = None,
-               prog: Optional[Progress] = None) -> tuple[list[Course], dict]:
+               prog: Optional[Progress] = None,
+               obs: Optional[dict] = None) -> tuple[list[Course], dict]:
     courses: list[Course] = []
     pages = 0
     warning_hit = False
     prev_signature: Optional[str] = None
     meta = {"pages": 0, "finished": False, "warning_hit": False}
+    # obs 是「观察状态累加器」：即使 walk_pages 中途抛异常，fetch_round 也能从
+    # obs 拿回已经看过的页数 / 是否命中警告，不会把"查过几页"误判成"0 页无观察"。
+    obs = obs if obs is not None else {}
+    obs["pages"] = 0
+    obs["warning_hit"] = False
 
     while pages < max_pages:
-        # 先等课程表渲染出来再提取（页面未加载完就抓会拿到空数据）
+        obs["pages"] = pages  # 本页之前已成功读到的页数（异常时也能带出）
+        # 先等页面进入确定状态：课程表就绪 或 明确风控警告（不是只等课程表，
+        # 否则风控页替换掉课程表时会等到超时而漏掉真正触发的警告）。
         first = pages == 0
-        if not _wait_table(session, timeout_s=25.0 if first else 15.0, log=log):
-            ok_wait = False
-            for _ in range(2):  # 重试等待两轮
-                sleep_rand(2.0, 3.5)
-                if _table_ready(session):
-                    ok_wait = True
-                    break
-            if not ok_wait:
-                if log:
-                    log("课程表长时间未出现（页面未加载/被拦截），本轮提前结束")
-                meta["finished"] = True
-                break
+        state = _wait_page_state(session, timeout_s=25.0 if first else 15.0, log=log)
+        if state == PAGE_WARNING:
+            if log:
+                log("检测到风控阻断页（课程表消失 + 出现警告文案），本轮提前结束")
+            warning_hit = True
+            obs["warning_hit"] = True
+            meta["warning_hit"] = True
+            meta["finished"] = True
+            break
+        if state == PAGE_TIMEOUT:
+            # 既没课程表也没明确警告：无法确定是"被拦"还是"没加载完"，不计入风控样本
+            if log:
+                log("页面长时间未就绪（无课程表、也无明确警告），本轮提前结束")
+            meta["finished"] = True
+            break
+        # state == PAGE_TABLE：正常课程表
 
         data = oc.eval_js(session, EXTRACT_JS)
         if not isinstance(data, dict):
@@ -517,7 +546,10 @@ def walk_pages(session: str, window: Optional[str] = None,
             c.page = pages + 1
         courses.extend(page_courses)
         warning_hit = warning_hit or warned
+        if warned:
+            obs["warning_hit"] = True
         pages += 1
+        obs["pages"] = pages
 
         # 同页重复护栏：翻页点击失败时可能停在原页，连续两页内容完全一样就停
         if pages >= 2 and page_courses and prev_signature == parser._sig(page_courses):
@@ -573,18 +605,24 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     """
     result = FetchResult()
     prog = Progress(on_progress) if on_progress else None
+    obs: dict = {}
     try:
         result.login_mode = login(session, creds=creds, window=window,
                                   force_logout=force_logout, log=log, prog=prog)
         goto_supplement(session, window=window, log=log, prog=prog)
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
-                                          log=log, prog=prog)
+                                          log=log, prog=prog, obs=obs)
         result.pages = meta.get("pages", 0)
         result.warning_hit = bool(meta.get("warning_hit"))
-        # 是否「有效抓取」：真正进入了补退选页面并读取/解析了至少一页文本。
-        # 只有这类 attempt 才有机会观察风控警告，才计入风控触发率分母。
-        result.warning_checked = result.pages >= 1
     except (FetchError, oc.OpenCliError) as exc:
         result.ok = False
         result.error = str(exc)
+        # walk_pages 中途抛异常也要带回已观察的风控/页数状态，
+        # 避免"已检查过几页却被当成 0 页无观察"漏记/误记风控样本。
+        result.pages = obs.get("pages", result.pages)
+        result.warning_hit = obs.get("warning_hit", result.warning_hit)
+    # 是否「有效抓取」：有确定观察结果——真正进入补退选页读到 ≥1 页，
+    # OR 明确命中风控阻断警告（警告页 pages 可能为 0，但这恰是最该计入的样本）。
+    # 只有这类 attempt 才计入风控触发率分母；登录失败/页面空白超时等无观察的不计入。
+    result.warning_checked = result.warning_hit or result.pages >= 1
     return result

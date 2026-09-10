@@ -23,7 +23,7 @@ os.environ["COURSER_CONFIG"] = str(Path(tempfile.mkdtemp()) / "config.json")
 from rich.console import Console  # noqa: E402
 
 from courser.config import Config  # noqa: E402
-from courser.models import Course  # noqa: E402
+from courser.models import Course, RoundResult  # noqa: E402
 from courser.tui.app import CourserApp  # noqa: E402
 
 COURSES = [
@@ -55,7 +55,7 @@ async def _capture(w: int, h: int) -> tuple[str, str]:
         app.courses = COURSES
         app.main.snapshot_ts = "2026-09-07 19:39:41"
         app.main.snapshot_meta = "8 页 · 152 门课程"
-        app.main.snapshot_risk = (5, "低", 5, 100)
+        app.main.risk_summary = (5, "低", 5, 100)
         app._render_main(force=True)
         await p.pause(0.2)
         hero = _renderable_text(app.query_one("#hero").render(), w - 4)
@@ -103,21 +103,41 @@ async def test_table_alignment_and_format() -> None:
 async def test_risk_unknown_and_high():
     """风控未知/无样本 → '—'；高/极高 → 红色；0% → 绿色（不崩溃）。"""
     app = CourserApp(Config())
-    app.main.snapshot_risk = None
+    app.main.risk_summary = None
     assert "—" in app._risk_value_markup()
-    app.main.snapshot_risk = (0, "无", 0, 0)
+    app.main.risk_summary = (0, "无", 0, 0)
     assert "—" in app._risk_value_markup(), "无样本应对显示未知"
-    app.main.snapshot_risk = (100, "极高", 10, 10)
+    app.main.risk_summary = (100, "极高", 10, 10)
     m = app._risk_value_markup()
     assert "100%" in m and "red" in m
-    app.main.snapshot_risk = (0, "无", 0, 10)
+    app.main.risk_summary = (0, "无", 0, 10)
     assert "0%（0/10）" in app._risk_value_markup()
+
+
+async def test_risk_summary_updates_without_courses():
+    """风控命中而本轮无课程（典型的阻断场景）时，Hero 风控也必须更新为最新历史。
+    回归点：不能只在 `r.ok and r.courses` 时才更新（否则重启后显示旧 last_round）。"""
+    cfg = Config()
+    cfg.first_run_done = True
+    app = CourserApp(cfg)
+    async with app.run_test(size=(120, 30)) as p:
+        await p.pause(0.2)
+        app.main.risk_summary = (0, "无", 0, 8)   # 旧值（例如上次 0/8）
+        # 本轮：真的触发风控、没有课程数据（警告阻断页）
+        r = RoundResult(ok=True, pages=0, courses=[], warning_hit=True,
+                        risk_percent=11, risk_label="中", risk_hits=1, risk_total=9)
+        app._apply_round(r)
+        assert app.main.risk_summary == (11, "中", 1, 9), \
+            "本轮无课程也必须刷新风控摘要为 1/9，不能停在上次 0/8"
+        await p.pause(0.2)
+    print("✓ Hero：风控命中且本轮无课程 → risk_summary 仍更新（1/9）")
 
 
 async def main() -> int:
     await test_hero_layout()
     await test_table_alignment_and_format()
     await test_risk_unknown_and_high()
+    await test_risk_summary_updates_without_courses()
     print("Hero / 表格对齐回归：两栏·窄屏单栏·筛选通知·最近抓取·数据·风控·右对齐·拆分限选/已选 ✅")
     return 0
 

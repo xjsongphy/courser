@@ -66,19 +66,38 @@ class RiskHistory:
         try:
             if self.path.exists():
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
-                self.samples = deque(list(raw.get("samples", []))[-self.maxlen:])
+                raw_samples = (raw.get("samples", [])
+                               if isinstance(raw, dict) else [])
+                self.samples = deque(self._valid_samples(raw_samples)[-self.maxlen:])
         except Exception:
             self.samples = deque()
+
+    @staticmethod
+    def _valid_samples(items: list) -> list[dict]:
+        """校验并规范化样本；单条损坏只丢它，不拖垮整个 history。"""
+        valid: list[dict] = []
+        for s in items:
+            if not isinstance(s, dict) or "hit" not in s:
+                continue
+            try:
+                valid.append({"ts": float(s.get("ts", 0) or 0),
+                              "hit": bool(s["hit"])})
+            except Exception:
+                continue
+        return valid
 
     def _save(self) -> None:
         if not self.path:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
+            # 原子写：先写临时文件再 replace，避免中途崩溃留下半截 JSON。
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(
                 json.dumps({"samples": list(self.samples)},
                            ensure_ascii=False, indent=2),
                 encoding="utf-8")
+            tmp.replace(self.path)
         except Exception:
             pass
 

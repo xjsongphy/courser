@@ -19,7 +19,9 @@ class MainViewState:
     top: int = 0               # 可视窗口顶行（在可见行中的下标）
     snapshot_ts: Optional[str] = None
     snapshot_meta: str = ""
-    snapshot_risk: Optional[tuple] = None   # (risk_percent:int, risk_label:str)；None=未知
+    # 风控摘要：(risk_percent:int, risk_label:str, risk_hits:int, risk_total:int)；
+    # 来自 RiskHistory 真实历史（不再依赖最近成功课程快照 last_round.json），None=未知。
+    risk_summary: Optional[tuple] = None
     search_col: Optional[str] = None   # 当前查找列（page/no/name/cat/…）；None = 未启用
     search_query: str = ""             # canonical 查找词：live filter 唯一查询来源，
                                         # 编辑中输入即同步（见 _edit_key）

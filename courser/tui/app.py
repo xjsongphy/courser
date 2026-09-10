@@ -51,8 +51,9 @@ from ..editing import FieldEditor
 from ..filters import FilterSet
 from ..models import Course, RoundResult
 from ..scheduler import MonitorScheduler
+from ..risk import RiskHistory, risk_label
 from ..course_table import COURSE_COLUMNS, course_display, seats_display
-from ..storage import SnapshotStore
+from ..storage import RISK_FILE, SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
 from .theme import (ACCENT, COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
@@ -154,6 +155,10 @@ class CourserApp(App):
         self.candidate_lists = {"names": [], "categories": [], "depts": []}
         self.watcher: Optional[MonitorScheduler] = None
         self.snapshot = SnapshotStore()
+        # 风控摘要的唯一数据源：RiskHistory（data/risk_history.json）真实历史。
+        # 不再从最近成功课程快照 last_round.json 读——那会在风控命中而本轮无课程时
+        # 显示旧值（另一处 source of truth，早晚漂移）。
+        self.risk = RiskHistory(path=RISK_FILE)
         # 状态 bundle（归并原先散落的 self.*）
         self.main = MainViewState()          # 主页：view / index / top / snapshot
         self.prog = ProgressState()          # 抓取进度
@@ -186,7 +191,14 @@ class CourserApp(App):
         ts, meta = self.snapshot.meta()
         self.main.snapshot_ts = ts
         self.main.snapshot_meta = meta
-        self.main.snapshot_risk = self.snapshot.risk()
+        self.main.risk_summary = self.risk_summary_from_history()
+
+    def risk_summary_from_history(self) -> Optional[tuple]:
+        """从真实风控历史加载摘要：(percent, label, hits, total) 或 None。"""
+        percent, hits, total = self.risk.evaluate()
+        if percent is None:
+            return None
+        return (percent, risk_label(percent), hits, total)
 
     # ------------------------------------------------------------------
     # 日志（环形缓冲；落盘由 scheduler/runner 负责）
@@ -684,7 +696,7 @@ class CourserApp(App):
     def _risk_value_markup(self) -> str:
         """风控一行：无样本/未知 → '—'；格式 `percent%（hits/total）`，
         小样本如实显示（如 33%（1/3））；颜色：0/低 绿 · 中 黄 · 高/极高 红。"""
-        risk = self.main.snapshot_risk
+        risk = self.main.risk_summary
         if not risk:
             return ui_meta("—")
         try:
@@ -1141,7 +1153,7 @@ class CourserApp(App):
         hdr.update(ui_title("设置"))
         # 顶部不再重复展示「gws ✓ 已安装」——那是 Hero「通知」的职责。
         # Settings 只在邮件分组里给出该环境异常时的局部诊断（正常不报喜）。
-        MAIL_GROUP = "邮件通知（gws 发送，需先 `gws auth login` 授权）"
+        MAIL_GROUP = ("邮件通知（gws 发送，需先 `gws auth setup` 后 `gws auth login` 授权）")
         group_names = {
             "账号凭据（可选；留空则依赖浏览器密码管理器自动填充）":
                 ("账号", "可留空，登录时依赖浏览器密码管理器自动填充"),
@@ -1160,7 +1172,7 @@ class CourserApp(App):
                     if not notifier.gws_available():
                         note_markup = ui_warn(
                             f"  ✗ 未找到 gws，请先执行 {notifier.GWS_INSTALL_COMMAND}，"
-                            "再执行 gws auth login")
+                            f"再执行 {notifier.GWS_SETUP_COMMAND} 与 {notifier.GWS_LOGIN_COMMAND}")
                     else:
                         note_markup = ui_meta("  通过 gws 发送提醒")
                 elif _note:
@@ -1455,7 +1467,9 @@ class CourserApp(App):
         lines.append("  " + ("[green]✓[/] gws 已安装"
                              if gws else f"[red]✗[/] gws 未安装（{notifier.GWS_INSTALL_COMMAND}）"))
         if gws:
-            lines.append("  [yellow]⚠[/] gws 尚未授权——请先在命令行执行 gws auth login")
+            lines.append("  [yellow]⚠[/] gws 尚未配置授权：请先在命令行执行 "
+                         f"{notifier.GWS_SETUP_COMMAND}（一次性），"
+                         f"再执行 {notifier.GWS_LOGIN_COMMAND}")
         lines.extend(["", ui_section("收件邮箱"), ui_meta("用于接收提醒，必填")])
         if self.editing.context == "setup" and self.editing.key == "to":
             lines.append(_kv_row("邮箱", self.editor.markup(), width=12, prefix="❯ "))
@@ -1975,13 +1989,15 @@ class CourserApp(App):
     def _apply_round(self, r: RoundResult) -> None:
         # 本轮结束：清掉进行中的进度，避免残留"正在读取…"
         self.prog.clear()
+        # 风控摘要每轮都更新（不论 r.ok、不论有没有课程）——风控命中而本轮无课程
+        # /失败时，正是最需要刷新风控历史的地方；来源是 RiskHistory 独立历史。
+        self.main.risk_summary = (r.risk_percent, r.risk_label,
+                                  r.risk_hits, r.risk_total)
         if r.ok and r.courses:
             self.courses = r.courses
             self.candidate_lists = self.snapshot.save(r)
             self.main.snapshot_ts = time.strftime("%Y-%m-%d %H:%M:%S")
             self.main.snapshot_meta = f"{r.pages} 页 · {len(r.courses)} 门课程"
-            self.main.snapshot_risk = (r.risk_percent, r.risk_label,
-                                       r.risk_hits, r.risk_total)
         if self.fv.gathering:
             self._on_gather_done()
         if self.page == "main":

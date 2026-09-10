@@ -53,11 +53,22 @@ EXTRACT_JS = r"""
 })()
 """
 
-# 课程表是否已渲染出来（页面加载未完成时抓取会拿到空数据）。
-TABLE_READY_JS = (
-    r"(() => { const tb = [...document.querySelectorAll('table')]; "
-    r"for (const t of tb) { const cs = [...t.querySelectorAll('th,td')]"
-    r".map(c => (c.textContent || '').trim()); "
-    r"if (cs.some(x => x.includes('课程号')) && cs.some(x => x.includes('限数'))) "
-    r"return true; } return false; })()"
-)
+# 页面在位状态检测（三态）用于等待页面的判定：正常课程表 / 明确阻断警告 / 超时。
+# 必须【同时等课程表 和 阻断性风控警告】——风控阻断页会把课程表替换掉，
+# 若只等课程表会一直等到超时而被误判成"0 页正常完成"。
+PAGE_STATE_JS = r"""
+(() => {
+  const tb = [...document.querySelectorAll('table')];
+  let ready = false;
+  for (const t of tb) {
+    const cs = [...t.querySelectorAll('th,td')].map(c => (c.textContent || '').trim());
+    if (cs.some(x => x.includes('课程号')) && cs.some(x => x.includes('限数')))
+      { ready = true; break; }
+  }
+  // 与 EXTRACT_JS 同源：仅当课程表消失且出现风控文案才算真的被拦
+  // （选课页常驻"请勿使用刷课机"提示条，不能因静态文案误报）。
+  const body = document.body.innerText || '';
+  const warning = !ready && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body);
+  return { ready, warning };
+})()
+"""
