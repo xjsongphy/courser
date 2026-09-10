@@ -5,6 +5,18 @@ description = "PKU 补退选空余名额监控：opencli 驱动后台 Chrome，�
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+authors = [{ name = "xjsongphy" }]
+keywords = ["pku", "补退选", "选课", "监控", "reminder", "tui", "textual"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Utilities",
+]
 dependencies = [
     "rich>=15.0.0",
     "textual>=8.2.8",
@@ -12,6 +24,11 @@ dependencies = [
 
 [project.scripts]
 courser = "courser.tui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/xjsongphy/courser"
+Repository = "https://github.com/xjsongphy/courser"
+Issues = "https://github.com/xjsongphy/courser/issues"
 
 [build-system]
 requires = ["hatchling"]

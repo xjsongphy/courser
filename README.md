@@ -6,6 +6,18 @@
 
 > 请只用于自己的账号，并遵守学校的相关规定。登录、查询和翻页之间会保留随机间隔；遇到风控提示或验证码时，程序会停止本轮，而不是继续尝试。
 
+```bash
+# 从 PyPI 安装（只带 rich/textual；opencli/gws 需另装，见下方）
+pipx install courser        # 或：uv tool install courser
+
+# 或从源码跑
+python -m venv .venv && . .venv/bin/activate
+pip install -e .
+```
+
+> 发布到 PyPI 只包含 courser 自身与 `rich`/`textual` 两个 Python 依赖。
+> **opencli / gws 不随包发布，需在本机单独安装**（见下方 Quick start 的说明）。
+
 ## Quick start
 
 需要：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Chrome，以及两个已完成配置的命令行工具：
