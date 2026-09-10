@@ -7,7 +7,6 @@ Run: .venv/bin/python scripts/smoke_search.py
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 import tempfile
@@ -15,12 +14,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 必须在导入 courser.config 之前设置：CONFIG_PATH 在模块 import 时即定值，
+# 若此时才设，会把真实 config.json 当配置源，筛选条件会影响 seats 视图（非唯一）。
+_tmpdir = tempfile.mkdtemp(prefix="courser-search-")
+os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
+
 from courser.config import Config  # noqa: E402
 from courser.models import Course  # noqa: E402
 from courser.tui.app import CourserApp  # noqa: E402
-
-_tmpdir = tempfile.mkdtemp(prefix="courser-search-")
-os.environ["COURSER_CONFIG"] = str(Path(_tmpdir) / "config.json")
 
 
 def _fake(app) -> None:
@@ -89,30 +90,41 @@ async def main():
         assert app.main.search_col == "cat", app.main.search_col
         assert len(_visible(app)) == 0, "类别列按「数学」应无结果"
 
-        # 4) 回车确认：退出输入态、查找词保留、过滤继续生效
+        # 4) 查找编辑态常开：Enter=打开详情（当前 cat 列空词→0 行，无行不应跳详情/崩溃）
+        #    Esc 才退出查找。这与 _main_hint「Enter 查看详情 / Esc 退出查找」一致。
         await pilot.press("enter")
         await pilot.pause()
-        assert app.editing.context is None, "回车后应退出编辑态"
+        assert app.page == "main", "0 行时 Enter 不应打开详情"
+        assert app.editing.context == "search", "Enter 不退出编辑态（编辑态常开）"
         assert app.main.search_query == "数学", app.main.search_query
-        assert len(_visible(app)) == 0
 
-        # 5) 再 / 修改：清空 → 回车提交 → 恢复 3 门；Esc 清除整条查找
-        await pilot.press("/")
-        await pilot.press("backspace", "backspace")
-        await pilot.pause()
-        assert app.editor.text == "", app.editor.text
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.editing.context is None, "回车应退出编辑态"
-        assert app.main.search_query == "", app.main.search_query
-        assert len(_visible(app)) == 3, "清空查找词应恢复全部"
-        # 查找仍激活（空词）→ Esc 清除整条查找
+        # 5) Esc 退出查找：编辑态常开靠 Esc 关闭，清空整条查找、恢复全部
         await pilot.press("escape")
         await pilot.pause()
+        assert app.editing.context is None, "Esc 应退出查找编辑态"
         assert app.main.search_col is None, "Esc 应清除整条查找"
-        assert si.display is False, "清除后输入行应隐藏"
+        assert si.display is False, "退出后输入行应隐藏"
+        assert len(_visible(app)) == 3, "清除查找应恢复全部 3 门"
 
-        # 6) 三个视图都提供 / 入口：1/2/3 下按 / 都能弹出查找框
+        # 6) 有结果时 Enter 打开当前行详情；返回后编辑态仍在（常开）；三视图都提供 / 入口
+        await pilot.press("/")
+        await pilot.press("数", "学")
+        await pilot.pause()
+        rows = _visible(app)
+        assert len(rows) == 1 and "高等数学" in rows[0].name, rows
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.page == "detail", "Enter 应打开当前行详情"
+        assert app.editing.context == "search", "详情页编辑态仍常开"
+        await pilot.press("escape")   # 回到主页；编辑态仍在
+        await pilot.pause()
+        assert app.page == "main"
+        assert app.editing.context == "search"
+        await pilot.press("escape")   # 退出查找
+        await pilot.pause()
+        assert app.editing.context is None
+        assert len(_visible(app)) == 3, "退出查找应恢复全部 3 门"
+
         for view, key in (("all", "1"), ("matched", "2"), ("seats", "3")):
             await pilot.press(key)
             await pilot.pause()
@@ -120,9 +132,7 @@ async def main():
             await pilot.press("/")
             await pilot.pause()
             assert app.editing.context == "search", f"{view} 视图 / 应可用"
-            await pilot.press("escape")   # 取消编辑
-            await pilot.pause()
-            await pilot.press("escape")   # 清除查找（若还开着）
+            await pilot.press("escape")   # 编辑态常开 → 一次 Esc 即可清除整条查找
             await pilot.pause()
             assert app.main.search_col is None, f"{view} 视图清除查找失败"
         # 回到全部视图
@@ -145,8 +155,9 @@ async def main():
         await pilot.pause()
         rows = _visible(app)
         assert len(rows) == 1 and rows[0].name == "中国哲学", [r.name for r in rows]
-        await pilot.press("escape", "escape")
+        await pilot.press("escape")
         await pilot.pause()
+        assert app.main.search_col is None, "Esc 应清除查找"
         assert len(_visible(app)) == 2, "seats 视图未查找时应只有有空余的 2 门"
         print("✓ 主页按列查找 headless 冒烟通过")
 
