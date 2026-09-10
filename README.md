@@ -13,6 +13,13 @@ pipx install courser        # 推荐：独立 CLI 环境，不污染系统 Pytho
 pip install courser
 ```
 
+```bash
+# 更新
+pipx upgrade courser        # 推荐（pipx 安装时用这个）
+pip install --upgrade courser   # 或：pip install -U courser
+uv tool upgrade courser     # 若当初用 uv tool install
+```
+
 > 发布到 PyPI 只包含 courser 自身与 `rich`/`textual` 两个 Python 依赖。
 > **opencli / gws 不随包发布，需在本机单独安装**（见下方 Quick start 的说明）。
 
