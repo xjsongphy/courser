@@ -8,11 +8,9 @@
 
 ```bash
 # 从 PyPI 安装（只带 rich/textual；opencli/gws 需另装，见下方）
-pipx install courser        # 或：uv tool install courser
-
-# 或从源码跑
-python -m venv .venv && . .venv/bin/activate
-pip install -e .
+pipx install courser        # 推荐：独立 CLI 环境，不污染系统 Python
+# 或装入当前 Python 环境：
+pip install courser
 ```
 
 > 发布到 PyPI 只包含 courser 自身与 `rich`/`textual` 两个 Python 依赖。
