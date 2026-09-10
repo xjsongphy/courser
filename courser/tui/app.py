@@ -53,7 +53,8 @@ from ..filters import FilterSet
 from ..models import Course, RoundResult
 from ..scheduler import MonitorScheduler
 from ..risk import RiskHistory, risk_label
-from ..course_table import COURSE_COLUMNS, course_display, seats_display
+from ..course_table import (COURSE_COLUMNS, course_display, ordered_courses,
+                           seats_display)
 from ..storage import RISK_FILE, SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
@@ -2091,6 +2092,48 @@ class CourserApp(App):
                else f"✓ 已复制 {len(text)} 个字符")
         self.notify(msg, title="", timeout=1.5)
 
+def _render_once_result(out: Console, r: RoundResult) -> None:
+    """`courser --once` 的结果展示：汇总 Panel + 命中课程 Table 全部走 Rich。
+
+    独立成函数便于无头测试渲染；非 TTY 时 Rich 自动去色/去框。
+    """
+    from rich.markup import escape
+    seats = [c for c in r.matched if c.has_seats]
+    ok = r.ok
+    summary = Text()
+    summary.append("页数 ", style="dim"); summary.append(f"{r.pages}", style="bold")
+    summary.append("  课程 ", style="dim"); summary.append(f"{r.total}", style="bold")
+    summary.append("  命中 ", style="dim"); summary.append(f"{len(r.matched)}", style="bold")
+    summary.append("  空余 ", style="bold")
+    summary.append(f"{len(seats)}", style="bold green" if seats else "bold")
+    out.print(Panel(
+        summary,
+        title=ui_title(" 补退选空余名额 "),
+        border_style=ACCENT,
+        subtitle=f"状态：[{('green' if ok else 'red')}]● {'成功' if ok else '失败'}[/]",
+        padding=(0, 1),
+    ))
+
+    if r.matched:
+        table = Table(show_header=True, header_style=f"bold {ACCENT}",
+                      box=None, show_edge=False, pad_edge=False, padding=(0, 2))
+        for key, label in (("name", "课程名"), ("no", "课程号"), ("cat", "类别"),
+                           ("dept", "开课单位"), ("seats", "限选/已选"),
+                           ("avail", "空余"), ("status", "状态")):
+            table.add_column(label, justify=("right" if key in ("no", "seats", "avail") else "left"))
+        for c in ordered_courses(r.matched):
+            avail = course_display(c, "avail")
+            avail_markup = f"[green]{avail}[/]" if c.has_seats else f"[dim]{avail}[/]"
+            table.add_row(
+                escape(c.name or "—"), escape(c.course_no or "—"),
+                escape(c.category or "—"), escape(c.dept or "—"),
+                seats_display(c), avail_markup, escape(c.status or "—"),
+            )
+        out.print(table)
+    else:
+        out.print(ui_meta("本轮无命中课程。"))
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="courser",
                                  description="PKU 补退选空余名额监控（纯文本 TUI）")
@@ -2102,30 +2145,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = Config.load()
 
     if args.once:
-        import sys
+        # 非 TUI 的一次性运行：进度/日志走 stderr，结果走 stdout。
+        # 用 Rich 美化（非 TTY 时自动去色/去框线，便于 cron 与重定向）；主要产品仍是 TUI。
+        from rich.markup import escape
+        err = Console(stderr=True, highlight=False)
+        out = Console(highlight=False)
 
         def cli_log(msg: str) -> None:
-            print(f"[courser] {msg}", flush=True)
+            # escape 防注入：日志是明文，[] 应原样输出而非被当 Rich 样式
+            err.print(f"\\[courser] {escape(str(msg))}", soft_wrap=True)
 
         def cli_progress(done, total, op):
-            # 与 TUI 相同的抓取进度：单行实时更新到 stderr，不污染 stdout 的结果输出
-            frac = f"{done}/{total}" if total else str(done)
-            sys.stderr.write(f"\r[courser] 抓取 {frac} 步 · {op}" + " " * 4)
-            sys.stderr.flush()
+            # 与 TUI 相同：只写"正在做什么"；每条进度独立一行（不用 \r 覆盖）
+            err.print(f"\\[courser] {ui_meta(str(op))}", soft_wrap=True)
 
         sched = MonitorScheduler(cfg, log=cli_log, on_progress=cli_progress)
-        try:
-            r = sched.run_round()
-        finally:
-            # 清掉进度行，避免和最终结果混在一起
-            sys.stderr.write("\r" + " " * 90 + "\r")
-        seats = [c for c in r.matched if c.has_seats]
-        print(f"结果：{'成功' if r.ok else '失败'} | 页数 {r.pages} | 课程 {r.total} | "
-              f"命中 {len(r.matched)} | 其中空余 {len(seats)}")
-        for c in r.matched:
-            print(f"  - {c.name} [{c.course_no}] {c.category} {c.dept} "
-                  f"限选/已选 {seats_display(c)} 空余 {course_display(c, 'avail')} "
-                  f"状态 {c.status or '—'}")
+        r = sched.run_round()
+        _render_once_result(out, r)
         return 0 if r.ok else 2
 
     # mouse=True：由 Courser/Textual 接管鼠标——拖动=选择，松手=自动复制（OSC52），
