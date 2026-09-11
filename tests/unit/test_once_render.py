@@ -58,10 +58,101 @@ def test_once_no_match_failure():
     print("✓ --once 无命中失败：失败状态 + 无课程提示")
 
 
+# ---------------------------------------------------------------------------
+# --once 表现层（Live/Plain）
+# ---------------------------------------------------------------------------
+
+
+def _mk_ok() -> RoundResult:
+    r = RoundResult(ok=True, login_mode="login_click", pages=7, total=136)
+    r.matched = [Course(avail=1), Course(avail=1)] + [Course(avail=0)] * 4
+    r.notified = [object()]
+    return r
+
+
+def _render_summary(r) -> str:
+    from courser.tui.once_render import render_summary_from_result
+    buf = StringIO()
+    Console(file=buf, force_terminal=False, width=100, color_system=None).print(
+        render_summary_from_result(r))
+    return buf.getvalue()
+
+
+def test_summary_ok():
+    s = _render_summary(_mk_ok())
+    assert "✓" in s and "登录" in s and "重新登录" in s
+    assert "7 页 · 136 门" in s
+    assert "6 门 · 2 门有空余" in s
+    assert "已发送 1 封" in s
+    print("✓ 摘要（成功）：登录/抓取/筛选/通知 ✓ 行")
+
+
+def test_summary_fail():
+    r = RoundResult(ok=False, error="登录未成功。尝试记录：…")
+    s = _render_summary(r)
+    assert "✗" in s and "本轮失败" in s and "登录未成功" in s
+    print("✓ 摘要（失败）：✗ 行与错误首行")
+
+
+def _render_live(ren) -> str:
+    buf = StringIO()
+    Console(file=buf, force_terminal=False, width=100, color_system=None).print(ren._render())
+    return buf.getvalue()
+
+
+def test_tty_live_progress_and_phase_commit():
+    """TTY：进度驱动 ✓ 阶段行推进 + spinner 当前行；默认静默 debug 日志。"""
+    from rich.console import Console
+    from courser.tui.once_render import make_once_renderer
+    buf = StringIO()
+    con = Console(file=buf, force_terminal=True, width=100, highlight=False)
+    ren = make_once_renderer(con, con, verbose=False)
+    ren.progress(1, None, "检查现有登录状态…")
+    ren.progress(2, None, "已复用现有登录会话")
+    ren.progress(3, None, "已进入补退选页")
+    mid = _render_live(ren)
+    assert "登录" in mid and "补退选" in mid, "推进应把已完成阶段留成行"
+    ren.progress(4, None, "正在读取课程列表 第 4/7 页")
+    live = _render_live(ren)
+    assert "正在读取课程列表" in live and "抓取" in live, "当前动作应为 spinner 行"
+
+    ren.log("抓取准备：当前页=1")       # debug → 默认静默
+    assert "抓取准备：当前页=1" not in _render_live(ren)
+    ren.log("邮件已发送 → x@y.z")      # important → 浮出
+    assert "邮件已发送 → x@y.z" in _render_live(ren)
+
+    ren.finish(_mk_ok())
+    ren.stop()
+    final = buf.getvalue()
+    assert "7 页 · 136 门" in final and "邮件已发送 → x@y.z" in final
+    print("✓ TTY Live：阶段 ✓ 提交 + spinner + 默认静默 debug / 浮出重要日志")
+
+
+def test_plain_keeps_line_stream():
+    """非 TTY：逐行文本 + [courser] 前缀，保留 debug（grep/cron 友好）。"""
+    from rich.console import Console
+    from courser.tui.once_render import make_once_renderer
+    buf = StringIO()
+    con = Console(file=buf, force_terminal=False, width=100)
+    ren = make_once_renderer(con, con, verbose=False)
+    ren.progress(1, None, "正在读取课程列表 第 4/7 页")
+    ren.log("抓取准备：当前页=1")
+    ren.finish(_mk_ok())
+    ren.stop()
+    out = buf.getvalue()
+    assert "[courser]" in out and "正在读取课程列表 第 4/7 页" in out
+    assert "抓取准备：当前页=1" in out, "非 TTY 保留完整明细以便 grep"
+    print("✓ Plain：非 TTY 保留 [courser] 逐行 + 明细")
+
+
 def main() -> int:
     test_once_success_with_matched()
     test_once_success_with_seats()
     test_once_no_match_failure()
+    test_summary_ok()
+    test_summary_fail()
+    test_tty_live_progress_and_phase_commit()
+    test_plain_keeps_line_stream()
     print("=" * 60)
     print("--once 结果渲染测试通过 ✅")
     return 0
