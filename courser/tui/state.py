@@ -68,7 +68,8 @@ class SettingsViewState:
     test_mail_armed_at: Optional[float] = None  # 确认窗口起点；None = 未在确认
     test_mail_sending: bool = False             # 正在后台发送测试邮件（避免重入/不阻塞 UI）
     test_mail_result: Optional[bool] = None     # 最近一次测试发送结果；None=未完成或已清除
-    row_y: dict[int, int] = field(default_factory=dict)  # 字段行 → 正文起始行号（自动滚动用）
+    row_y: dict[int, int] = field(default_factory=dict)  # 字段行 → 正文起始行号（滚动用）
+    scroll: int = 0                # 滚动条偏移：#settings_list 首行行号（光标越界才变）
 
 
 @dataclass

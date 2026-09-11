@@ -386,6 +386,22 @@ async def main() -> int:
         # 设置页必须有固定 #keys 操作栏（正文滚动也不会把底部 footer 挤掉）
         assert app.query_one("#keys").display, "设置页应显示固定 #keys 操作栏"
         assert "↑↓" in str(app.query_one("#keys").render()), "设置页应显示页面级操作提示"
+        # 枚举档位：Tab 依次切换（force_relogin 关→开→关），底部提示应含 Tab
+        _eidx = next(i for i, (_g, f) in enumerate(app.s_rows) if f["key"] == "force_relogin")
+        while app.sv.index < _eidx:
+            await p.press("down")
+            await p.pause(0.02)
+        _before = app.sd["force_relogin"]
+        await p.press("tab")
+        await p.pause(0.05)
+        assert app.sd["force_relogin"] != _before, "Tab 应切换枚举档位"
+        assert "Tab" in str(app.query_one("#keys").render()), "枚举行底部提示应含 Tab 切换"
+        await p.press("tab")
+        await p.pause(0.05)
+        assert app.sd["force_relogin"] == _before, "再按 Tab 应切回"
+        app.sv.index = 0
+        app._render_settings_list()
+        await p.pause(0.05)
         for _ in range(2):
             await p.press("down")
         await p.pause(0.05)

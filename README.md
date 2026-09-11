@@ -49,6 +49,7 @@ uv tool upgrade courser     # 若当初用 uv tool install
   安装：`npm install -g @googleworkspace/cli`。
   首次先执行 `gws auth setup`（一次性初始化 Google Cloud 项目 / OAuth 配置 / 启用 API），
   再执行 `gws auth login` 授权 Gmail；之后 token 失效时重新 `gws auth login` 即可。
+- 注意将自己的账号添加到 Google Auth Platform 的测试用户中，否则可能无法完成 `gws` 的相关配置。
 
 ```bash
 git clone https://github.com/xjsongphy/courser

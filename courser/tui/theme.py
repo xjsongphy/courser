@@ -119,6 +119,11 @@ SETTINGS_FIELDS: list[tuple[str, list[dict]]] = [
          "opts": [("background", "后台窗口（不抢焦点）"), ("foreground", "前台窗口")]},
         {"key": "force_relogin", "label": "每轮强制重新登录", "kind": "enum",
          "opts": [("false", "关"), ("true", "开")]},
+        {"key": "night_pause", "label": "夜间暂停", "kind": "enum",
+         "opts": [("false", "关"), ("true", "开")],
+         "note": "0 点至 6 点暂停抓取"},
+        {"key": "random_break", "label": "随机暂停", "kind": "enum",
+         "opts": [("off", "关"), ("light", "轻"), ("medium", "中"), ("strong", "强")]},
     ]),
 ]
 
@@ -290,6 +295,10 @@ def field_value(cfg: Config, key: str) -> str:
         return str(cfg.notify.min_interval_min)
     if key == "force_relogin":
         return "true" if cfg.force_relogin else "false"
+    if key == "night_pause":
+        return "true" if cfg.night_pause else "false"
+    if key == "random_break":
+        return str(cfg.random_break or "off")
     return str(getattr(cfg, key, ""))
 
 
@@ -308,6 +317,10 @@ def field_mutate(cfg: Config, key: str, value: str) -> None:
         cfg.notify.min_interval_min = float(value)
     elif key == "force_relogin":
         cfg.force_relogin = value == "true"
+    elif key == "night_pause":
+        cfg.night_pause = value == "true"
+    elif key == "random_break":
+        cfg.random_break = value if value in ("off", "light", "medium", "strong") else "off"
     elif key == "session":
         cfg.session = value
     elif key == "window":

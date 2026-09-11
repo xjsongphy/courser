@@ -19,6 +19,14 @@ DATA_DIR = PROJECT_ROOT / "data"
 STATE_FILE = DATA_DIR / "notified.json"
 SEND_LOG_FILE = DATA_DIR / "send_log.json"   # 每小时发送预算的发送时间戳日志
 
+# 随机暂停档位：连续完成 rounds 轮后，随机休息 duration 分钟。
+# 故意不进参数面板，设置页只暴露一个档位选择。
+RANDOM_BREAK_PROFILES: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    "light": ((5, 8), (5, 12)),     # 轻
+    "medium": ((3, 6), (8, 20)),    # 中
+    "strong": ((2, 4), (12, 30)),   # 强
+}
+
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
@@ -112,6 +120,8 @@ class Config:
     session: str = "courser-watch"         # opencli 浏览器会话名
     window: str = "background"             # background=后台窗口，不抢焦点
     force_relogin: bool = False            # 默认复用有效会话；开启才每轮登出重登
+    night_pause: bool = False              # 0:00~6:00 暂停抓取，6 点后按 0 点前状态恢复
+    random_break: str = "off"               # 随机暂停档位：off/light/medium/strong
     first_run_done: bool = False           # 初次启动向导是否已完成
     cli_log: bool = False                  # CLI 模式（无 TUI）
 
@@ -131,6 +141,11 @@ class Config:
             cfg.session = str(d.get("session", cfg.session))
             cfg.window = str(d.get("window", cfg.window))
             cfg.force_relogin = bool(d.get("force_relogin", cfg.force_relogin))
+            cfg.night_pause = bool(d.get("night_pause", cfg.night_pause))
+            rb = d.get("random_break", cfg.random_break)
+            if isinstance(rb, bool):          # 兼容早期 bool 写法：true→中档
+                rb = "medium" if rb else "off"
+            cfg.random_break = str(rb)
             cfg.first_run_done = bool(d.get("first_run_done", cfg.first_run_done))
             cfg.credentials = Credentials.from_dict(d.get("credentials"))
             cfg.filters = Filters.from_dict(d.get("filters"))
@@ -159,6 +174,8 @@ class Config:
             "session": self.session,
             "window": self.window,
             "force_relogin": self.force_relogin,
+            "night_pause": self.night_pause,
+            "random_break": self.random_break,
             "first_run_done": self.first_run_done,
             "credentials": {"username": self.credentials.username,
                             "password": self.credentials.password},

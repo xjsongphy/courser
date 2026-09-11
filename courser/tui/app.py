@@ -47,7 +47,7 @@ from textual.geometry import Region
 from textual.widgets import Static
 
 from .. import notifier
-from ..config import Config, load_env_file
+from ..config import Config, RANDOM_BREAK_PROFILES, load_env_file
 from ..editing import FieldEditor
 from ..filters import FilterSet
 from ..models import Course, FetchFailureKind, RoundResult
@@ -1160,6 +1160,16 @@ class CourserApp(App):
     # ------------------------------------------------------------------
     # 渲染：设置页（draft 事务）
     # ------------------------------------------------------------------
+    def _field_note(self, f: dict) -> str:
+        """字段右侧的 dim 说明（同一行）。随机暂停按当前档位动态显示轮数/时长。"""
+        if f["key"] == "random_break":
+            prof = RANDOM_BREAK_PROFILES.get(str(self.sd.get("random_break", "off")))
+            if not prof:
+                return ""
+            (r0, r1), (d0, d1) = prof
+            return f"每 {r0}~{r1} 轮暂停 {d0}~{d1} 分钟"
+        return str(f.get("note", ""))
+
     def _enum_label_for(self, f: dict) -> str:
         val = self.sd.get(f["key"], "")
         for value, label in f["opts"]:
@@ -1252,6 +1262,9 @@ class CourserApp(App):
                 value = ui_key(val)
             else:
                 value = ui_value(val)
+            note = self._field_note(f)
+            if note:
+                value = f"{value}   {ui_meta(note)}"
             out.append(_kv_row(f["label"], value, width=16,
                                prefix=f"{cur} "))
         # 底部操作提示由全局 #keys 固定展示（见 _settings_hint），不再写在正文里。
@@ -1265,14 +1278,18 @@ class CourserApp(App):
 
     def _settings_hint(self) -> str:
         """设置页底部操作栏：只显示当前选中行真正可用的操作。
-        字段编辑态切到编辑键位；←→ 切换仅在 enum 行可用，其它行（文本/动作）不提示。"""
+        字段编辑态切到编辑键位；Tab 切换仅在 enum 行可用，其它行（文本/动作）不提示。"""
         if self.editing.context == "settings":
             return self._EDIT_HINT
         parts: list[tuple[str, str]] = [("↑↓", "选择")]
         _g, f = self.s_rows[self.sv.index]
         if f["kind"] == "enum":
-            parts.append(("←→", "切换"))
-        parts += [("Enter", "编辑/执行"), ("Ctrl+S", "保存"), ("Esc", "放弃")]
+            parts.append(("Tab", "切换"))
+        elif f["kind"] == "action":
+            parts.append(("Enter", "执行"))
+        else:
+            parts.append(("Enter", "编辑"))
+        parts += [("Ctrl+S", "保存"), ("Esc", "放弃")]
         return _hint(*parts)
 
     def _setup_hint(self) -> str:
@@ -1621,7 +1638,9 @@ class CourserApp(App):
             self._live_timer = self.set_timer(1.0, self._live_tick)
 
     def _next_round_text(self, w) -> str:
-        """下一轮倒计时（mm 分 ss 秒），随底部每秒刷新更新。"""
+        """下一轮倒计时（mm 分 ss 秒），随底部每秒刷新更新。夜间暂停显示恢复时刻。"""
+        if getattr(w, "night_pause_active", False):
+            return "6:00 恢复" if getattr(w, "next_round_ts", None) else "—"
         if not w or not w.next_round_ts:
             return "—"
         remain = max(0, int(w.next_round_ts - time.time()))
@@ -1645,7 +1664,9 @@ class CourserApp(App):
         抓取失败(红) / 本轮已停止(黄) / 未开始(灰)。"""
         anchor = ui_meta("• 状态")
         last = w.last_result if w else None
-        if w and w.running:
+        if getattr(w, "night_pause_active", False):
+            status = ui_warn("夜间暂停（0–6点）")
+        elif w and w.running:
             status = ui_ok("监控中")
         elif last is None:
             status = ui_meta("未开始")
@@ -1968,19 +1989,20 @@ class CourserApp(App):
         elif k == "down":
             event.stop()
             self._settings_move(1)
-        elif k in ("left", "right"):
+        elif k == "tab":
             _g, f = self.s_rows[self.sv.index]
             if f["kind"] == "enum":
                 event.stop()
-                self._settings_cycle(f, -1 if k == "left" else 1)
+                # 档位只用 Tab 依次切换（关→轻→中→强→关…）；不支持 ←/→。
+                self._settings_cycle(f, 1)
         elif k in ("enter",):
             _g, f = self.s_rows[self.sv.index]
-            event.stop()
             if f["kind"] == "action":
+                event.stop()
                 self._test_mail_enter()
-            elif f["kind"] == "enum":
-                self._settings_cycle(f, 1)
-            else:
+            elif f["kind"] != "enum":
+                # 仅文本字段支持回车进入编辑；非文本（enum）回车不切换、不响应。
+                event.stop()
                 self._settings_edit(f)
         elif k == "ctrl+s":
             event.stop()

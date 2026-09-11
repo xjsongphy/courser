@@ -10,15 +10,22 @@ start / stop），让 TUI 与 `--once` 无需感知内部拆分。
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 from typing import Callable, Optional
 
 from . import logfile
-from .config import Config
+from .config import Config, RANDOM_BREAK_PROFILES
 from .human import jitter
 from .models import FetchFailureKind, RoundResult
 from .runner import RoundRunner
+
+
+def _in_night_window(now=None):
+    """当前是否处于夜间窗口（0:00 ≤ hour < 6:00）。"""
+    now = now or time.localtime()
+    return 0 <= now.tm_hour < 6
 
 
 class MonitorScheduler:
@@ -45,6 +52,12 @@ class MonitorScheduler:
         self._thread: Optional[threading.Thread] = None
         self.running = False
         self.next_round_ts: Optional[float] = None
+        self._night_seen = False        # 本轮是否已进入过夜间暂停（避免重复日志）
+        self._resume_running = True     # 夜间暂停结束时是否恢复运行（= 进入夜间时是否在运行）
+        self._started_in_night = False  # 循环是否在夜间窗口内启动（0 点前未运行 → 6 点不自动恢复）
+        self._success_streak = 0        # 连续成功轮次（随机暂停计数）
+        self._break_tier = None         # 当前随机暂停档位（变化时重新计数）
+        self._break_after = 0           # 本次达到多少成功轮后休息
 
     # -- 转发给 runner --------------------------------------------------
     def run_round(self, fetch_round: Optional[Callable] = None,
@@ -70,7 +83,26 @@ class MonitorScheduler:
     # -- 线程生命周期 ----------------------------------------------------
     def _loop(self) -> None:
         self.running = True
+        self._night_seen = False
         while not self._stop.is_set():
+            self.cfg.reload()
+            # 夜间暂停：0:00~6:00 期间不执行轮次，仅等 6 点（或 night_pause 被关 / 收到停止）。
+            # 6 点后按「进入夜间时」的运行态恢复：跨夜运行才恢复；0 点前未运行则保持暂停。
+            if self.cfg.night_pause and _in_night_window():
+                if not self._night_seen:
+                    self._night_seen = True
+                    self._resume_running = not self._started_in_night
+                    self.next_round_ts = self._next_morning_ts()
+                    self.log("已进入夜间暂停（0:00~6:00）：暂停抓取，6 点后按 0 点前状态恢复")
+                if self._suppress_until_morning():
+                    break          # 收到停止信号
+                self._night_seen = False
+                if not self._resume_running:
+                    self.running = False
+                    self.log("夜间暂停结束：0 点前未运行，不自动恢复；保持暂停，可手动重新开始")
+                    break
+                self.log("夜间暂停结束，恢复监控")
+                continue
             self.run_round(cancel_event=self._stop)
             if self._stop.is_set():
                 break
@@ -88,16 +120,49 @@ class MonitorScheduler:
                 self.log("✗ OpenCLI/Chrome 浏览器桥不可用：停止监控；"
                          "请确保 Chrome/opencli 已启动后再重新开始")
                 break
+            break_secs = self._maybe_break(self.last_result)
+            if break_secs:
+                self.next_round_ts = time.time() + break_secs
+                self.log(f"⚠ 随机暂停：已连续完成多轮，休息约 {break_secs / 60:.1f} 分钟")
+                self._wait_sleep(break_secs)
+                continue
             wait = self._next_wait(self.last_result)
             if self.last_result and self.last_result.warning_hit:
                 self.log(f"⚠ 本轮命中风控提示，已放慢节奏：约 {wait / 60:.1f} 分钟后下一轮")
             self.next_round_ts = time.time() + wait
             self.log(f"本轮结束，约 {wait / 60:.1f} 分钟后开始下一轮")
-            # 分段 sleep，便于及时响应停止
-            deadline = time.time() + wait
-            while time.time() < deadline and not self._stop.is_set():
-                time.sleep(1.0)
+            self._wait_sleep(wait)
         self.running = False
+
+    def _maybe_break(self, last: Optional[RoundResult]) -> Optional[float]:
+        """随机暂停决策（工作窗口模型）：按档位成功轮计数，达到目标就返回应休息秒数。
+
+        档位映射见 config.RANDOM_BREAK_PROFILES；返回非空表示本轮结束后进入随机休息
+        （调用方负责 sleep）；返回 None 则走正常间隔。失败/取消/关闭 → 计数清零。
+        """
+        tier = self.cfg.random_break
+        profile = RANDOM_BREAK_PROFILES.get(tier)
+        if profile is None or not (last and last.ok and not last.cancelled):
+            self._success_streak = 0
+            self._break_tier = None
+            return None
+        rounds_range, dur_range = profile
+        if self._break_tier != tier:      # 首次开启/换档 → 重新开始计数
+            self._break_tier = tier
+            self._success_streak = 0
+            self._break_after = random.randint(*rounds_range)
+        self._success_streak += 1
+        if self._success_streak < self._break_after:
+            return None
+        self._success_streak = 0
+        self._break_after = random.randint(*rounds_range)
+        return random.uniform(*dur_range) * 60
+
+    def _wait_sleep(self, wait: float) -> None:
+        """分段 sleep，便于及时响应停止；wind 到点即停。"""
+        deadline = time.time() + wait
+        while time.time() < deadline and not self._stop.is_set():
+            time.sleep(1.0)
 
     def _next_wait(self, last: Optional[RoundResult]) -> float:
         """下一轮等待时间：**始终以基准间隔为底**，风控放慢只乘一次固定系数。
@@ -111,10 +176,37 @@ class MonitorScheduler:
             return jitter(base * 4.0, 0.3)
         return jitter(base, self.cfg.interval_jitter)
 
+    def _suppress_until_morning(self) -> bool:
+        """夜间暂停等待循环：每秒检查，直到 6 点 / night_pause 被关掉 / 收到停止。
+        返回 True 表示应结束本轮监控（收到停止）。"""
+        while not self._stop.is_set():
+            self.cfg.reload()
+            if not self.cfg.night_pause or not _in_night_window():
+                return False
+            time.sleep(1.0)
+        return True
+
+    def _next_morning_ts(self) -> float:
+        """今天 6:00 的时间戳（夜间窗口内调用，必然在今天）。"""
+        now = time.localtime()
+        return time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                            6, 0, 0, 0, 0, -1))
+
+    @property
+    def night_pause_active(self) -> bool:
+        """当前是否处于夜间暂停（开启且处于夜间窗口且监控在运行）。"""
+        return bool(self.cfg.night_pause) and _in_night_window() and self.running
+
+    @property
+    def night_resume_ts(self) -> Optional[float]:
+        return self._next_morning_ts() if self.night_pause_active else None
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        # 夜间窗口内启动：0 点前未运行 → 6 点不自动恢复（用户明确要求）
+        self._started_in_night = _in_night_window() and self.cfg.night_pause
         self._thread = threading.Thread(target=self._loop, daemon=True, name="courser-watcher")
         self._thread.start()
 
