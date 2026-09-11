@@ -155,7 +155,7 @@ class RoundRunner:
                     FetchFailureKind.CAPTCHA,
                     FetchFailureKind.RISK_BLOCKED,
                 }
-                if fr.failure_kind in no_retry or fr.error.startswith("登录未成功"):
+                if fr.failure_kind in no_retry:
                     self.log(f"本轮失败：{fr.error}。该状态不适合原地重试，"
                              "等待下一轮重新建立页面状态；如有验证码/风控请先人工处理。")
                 else:

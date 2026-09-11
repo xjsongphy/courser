@@ -31,6 +31,22 @@ class LoginError(FetchError):
     """登录失败（可能需要验证码/二次验证，或账号问题）。"""
 
 
+class AuthExpiredError(LoginError):
+    """选课会话已过期/尚未登录，需要重新登录。"""
+
+
+class CaptchaError(LoginError):
+    """页面出现验证码/二次验证，需要人工处理。"""
+
+
+class RiskBlockedError(FetchError):
+    """命中风控阻断页，本轮停止。"""
+
+
+class PageUnknownError(FetchError):
+    """无法把当前页面归入已知工作状态（结构上不能进一步区分的原因）。"""
+
+
 class FetchFailureKind(Enum):
     """供调度层使用的结构化失败原因，避免解析中文错误字符串。"""
 
