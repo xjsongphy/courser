@@ -204,6 +204,68 @@ async def test_settings_arrow_scroll_minimal_follow():
     print("✓ 设置页 ↑↓ 最小跟随：可视区内不动，越界才滚")
 
 
+async def test_settings_top_header_reachable_and_no_drift():
+    """设置页滚动：从底部回顶时「账号」组头（正文第 0 行）可复现；编辑/连按 Tab
+    不改变滚动位置；内部 sv.scroll 与真实 scroll_y 全程一致（抗漂移）。
+    回归：上滚曾把光标钉在顶边使 scroll 到不了 0，组头/备注永远滚不出来。"""
+    app = _fresh()
+    async with app.run_test(size=(110, 26)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        sc = app.query_one("#settingsscroll")
+        vh = app._settings_viewport_height()
+        txt = app.query_one("#settings_list")
+        # 下到底
+        for _ in range(25):
+            await pilot.press("down")
+            await pilot.pause(0.015)
+        # 回顶：光标每一步都在视口内、内部与真实一致
+        for _ in range(25):
+            y = app.sv.row_y.get(app.sv.index)
+            top = int(sc.scroll_y or 0)
+            assert top <= y <= top + vh - 1, "回顶时光标不能越出视口"
+            assert app.sv.scroll == int(sc.scroll_y or 0), "内部计数与真实滚动应一致"
+            await pilot.press("up")
+            await pilot.pause(0.015)
+        assert app.sv.index == 0
+        top = int(sc.scroll_y or 0)
+        assert top == 0, "回顶应回到正文顶部（露出组头）"
+        lines = str(txt.render()).splitlines()
+        assert lines and "账号" in lines[top], f"可见首行应为账号组头，实际 {lines[top] if top < len(lines) else 'N/A'!r}"
+        # 编辑一个文本字段并回车确认：滚动位置与光标可见性不变
+        to = next(i for i, (_g, f) in enumerate(app.s_rows) if f["key"] == "to")
+        app.sv.index = to
+        app._render_settings_list()
+        await pilot.pause(0.05)
+        top0 = float(sc.scroll_y)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        await pilot.press("z")
+        await pilot.pause(0.03)
+        await pilot.press("enter")
+        await pilot.pause(0.15)
+        await pilot.pause(0.2)
+        assert float(sc.scroll_y) == top0, "编辑确认不应改变滚动位置"
+        assert app.sv.scroll == int(sc.scroll_y or 0)
+        assert top0 <= app.sv.row_y.get(app.sv.index) <= top0 + vh - 1, "编辑后光标应仍在视口内"
+        # 枚举连按两下 Tab：值循环回原值，滚动不动
+        fr = next(i for i, (_g, f) in enumerate(app.s_rows) if f["key"] == "force_relogin")
+        app.sv.index = fr
+        app._render_settings_list()
+        await pilot.pause(0.05)
+        val0 = app.sd["force_relogin"]
+        top0 = float(sc.scroll_y)
+        await pilot.press("tab")
+        await pilot.pause(0.03)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert app.sd["force_relogin"] == val0, "连按两下 Tab 值应循环回原值"
+        assert float(sc.scroll_y) == top0, "连按 Tab 不应改变滚动位置"
+        assert app.sv.scroll == int(sc.scroll_y or 0)
+    print("✓ 设置页顶组头可复现 + 编辑/Tab 不漂移滚动")
+
+
 async def test_filters_arrow_scroll_minimal_follow():
     """筛选页也必须使用真实 viewport，光标不能随列表裁剪跑出页面。"""
     app = _fresh()
@@ -274,6 +336,7 @@ async def main() -> int:
     await test_auto_copy_does_not_change_state()
     await test_settings_wheel_does_not_change_selection()
     await test_settings_arrow_scroll_minimal_follow()
+    await test_settings_top_header_reachable_and_no_drift()
     await test_filters_arrow_scroll_minimal_follow()
     await test_help_logs_detail_have_wheel_scrollable_view()
     print("文本选择 + 自动复制结构/行为检查 OK：mouse=True · 拖动选择 · 自动复制 · 空选区忽略 · 不改变状态 · 滚轮解耦")

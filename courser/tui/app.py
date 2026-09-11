@@ -1189,9 +1189,9 @@ class CourserApp(App):
         for _g, f in self.s_rows:
             self.sd[f["key"]] = _field_value(self.cfg, f["key"])
         self.sv.index = 0
+        self.sv.scroll = 0
         self._render_settings_list()
         self.set_focus(None)
-        self.call_after_refresh(self._scroll_settings_to_selection)  # 首次布局未定，延迟一下
 
     def _render_settings_list(self) -> None:
         hdr = self.query_one("#settings_hdr", Static)
@@ -1270,7 +1270,7 @@ class CourserApp(App):
         # 底部操作提示由全局 #keys 固定展示（见 _settings_hint），不再写在正文里。
         self.sv.row_y = row_y
         self.query_one("#settings_list", Static).update("\n".join(out))
-        self._scroll_settings_to_selection()
+        self._keep_settings_selection_visible()
         try:
             self.query_one("#keys", Static).update(self._settings_hint())
         except Exception:
@@ -1303,23 +1303,63 @@ class CourserApp(App):
             ("Esc", "退出程序"),
         )
 
-    def _scroll_settings_to_selection(self) -> None:
-        """↑↓ 移动设置项时保持选中行可见，但**不把滚动条钉到顶部**：交给 Textual 的
-        scroll_to_region 做最小必要滚动（选中行已在真实 viewport 内则完全不动）。
-        不再手工推算 top/bottom——row_y 是 #settings_list 局部行号，先用 virtual_region
-        换算成 #settingsscroll 内容坐标，避免坐标系混用导致 off-by-N。"""
-        try:
-            scroll = self.query_one("#settingsscroll", FocusScroll)
-            body = self.query_one("#settings_list", Static)
-        except Exception:
+    def _keep_settings_selection_visible(self) -> None:
+        """设置页滚动：光标在可视区**内**移动时不动滚动条，只有越过边界才滚。
+
+        语义：光标在最底部上移时，先在可视区里往上走到底，不滚动；一直走到可视区
+        顶部后继续上移才开始把内容往下滚。下移同理：越过底部才滚。
+
+        每帧都以 **#settingsscroll 当前的实时 scroll_y** 作基线，而不是自己维护的
+        内部计数——这样即使 Textual 中途钳制/重排，也不会让内部状态与真实滚动漂移
+        而引发光标贴底或跳动。视口取滚动容器的**分配高度**（size.height，稳定，不随
+        正文重绘漂移）。光标行号来自 self.sv.row_y（#settings_list 内容坐标，0 打头）。
+        """
+        scroll = self._settings_scroll()
+        if scroll is None:
             return
-        row = Region(
-            0,
-            body.virtual_region.y + self.sv.row_y.get(self.sv.index, 0),
-            scroll.scrollable_content_region.width,
-            1,
-        )
-        scroll.scroll_to_region(row, animate=False, force=True)
+        vh = int(scroll.size.height) if scroll.size and scroll.size.height else 0
+        if vh <= 0:
+            return
+        n = len(self.s_rows)
+        top = int(scroll.scroll_y or 0)
+        if not n:
+            self.sv.scroll = top
+            return
+        y = self.sv.row_y.get(min(max(0, self.sv.index), n - 1), 0)
+        bottom = top + vh - 1
+        new = top
+        if y < top:
+            # 上越界：选中行升为可视区首行。第一个字段上方还有「账号」组头/备注，
+            # 允许 scroll 收到 0 免得它们（正文第 0、1 行）永远滚不出来。
+            new = 0 if self.sv.index == 0 else y
+        elif y > bottom:
+            new = y - vh + 1             # 下越界：选中行落为可视区末行（内容向上滚）
+        new = max(0, new)
+        if new != top:
+            try:
+                scroll.scroll_y = new
+            except Exception:
+                pass
+        # 始终以真实滚动回写内部计数，杜绝后续漂移。
+        self.sv.scroll = int(scroll.scroll_y or 0)
+
+    def _settings_scroll(self) -> "FocusScroll":
+        """返回设置页滚动容器；未就绪返回 None。"""
+        try:
+            return self.query_one("#settingsscroll", FocusScroll)
+        except Exception:
+            return None
+
+    def _settings_viewport_height(self) -> int:
+        """#settingsscroll 可视高度（行数）；未就绪返回 0。"""
+        s = self._settings_scroll()
+        if s is None or not s.size or not s.size.height:
+            return 0
+        return int(s.size.height)
+
+    def _scroll_settings_to_selection(self) -> None:
+        """旧版别名：保持选中行可见（走同一套保持可见逻辑）。"""
+        self._keep_settings_selection_visible()
 
     # -- 可复用的行内编辑（settings 与 setup 共用同一个 FieldEditor）-----
     _EDIT_HINT = _hint(
