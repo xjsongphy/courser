@@ -259,12 +259,31 @@ def test_on_progress_callback():
     print("✓ on_progress 透传给一轮内 fetch（--once 进度来源）")
 
 
+def test_typed_no_retry_runs_once():
+    """结构化 failure_kind（AUTH_EXPIRED/CAPTCHA）进入 no_retry → RoundRunner 只调 fetch 一次。
+    锁住“用类型而非中文字符串决定重试”的新行为。"""
+    from courser.models import FetchFailureKind
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
+    calls = {"n": 0}
+
+    def stub(**k):
+        calls["n"] += 1
+        return FetchResult(login_mode="", pages=0, ok=False,
+                           failure_kind=FetchFailureKind.AUTH_EXPIRED,
+                           error="尚未登录或者会话超时")
+
+    runner.run_round(fetch_round=stub)
+    assert calls["n"] == 1, f"AUTH_EXPIRED 不应原地重试，实际调用 {calls['n']} 次"
+    print("✓ 结构化 no_retry：AUTH_EXPIRED 只调 fetch_round 一次（不靠中文字符串）")
+
+
 def main() -> int:
     test_full_round_and_cooldown()
     test_warning_and_failure()
     test_round_callback_runs_after_timer_cleanup()
     test_cancel_interrupts_retry_wait()
     test_retry_and_no_retry_on_warning()
+    test_typed_no_retry_runs_once()
     test_budget_and_snapshot()
     test_on_progress_callback()
     print("=" * 60)

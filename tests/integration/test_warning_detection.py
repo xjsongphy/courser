@@ -158,11 +158,39 @@ def test_exception_keeps_observed_pages():
     print("✓ 读取中异常：保留 pages=1, warning_checked=True（不丢观察）")
 
 
+def test_captcha_during_fetch_is_typed_captcha():
+    """抓取中验证码：走结构化的 failure_kind=CAPTCHA，不靠中文文本解析。"""
+    from courser.models import FetchFailureKind
+    harness = _OCHarness(
+        page_state={"has_captcha": True, "ready": False, "warning": False},
+        extract=lambda s, i: (_ for _ in ()).throw(AssertionError("验证码页不应执行 EXTRACT_JS")),
+    )
+    fr = _fetch(harness)
+    assert not fr.ok, "验证码应判定失败"
+    assert fr.failure_kind == FetchFailureKind.CAPTCHA, fr.failure_kind
+    print("✓ 抓取中验证码：failure_kind=CAPTCHA（结构化，不靠字符串）")
+
+
+def test_session_expired_during_fetch_is_typed_auth_expired():
+    """抓取中会话超时：走结构化的 failure_kind=AUTH_EXPIRED。"""
+    from courser.models import FetchFailureKind
+    harness = _OCHarness(
+        page_state={"session_expired": True, "ready": False, "warning": False},
+        extract=lambda s, i: (_ for _ in ()).throw(AssertionError("超时页不应执行 EXTRACT_JS")),
+    )
+    fr = _fetch(harness)
+    assert not fr.ok, "会话超时应判定失败"
+    assert fr.failure_kind == FetchFailureKind.AUTH_EXPIRED, fr.failure_kind
+    print("✓ 抓取中会话超时：failure_kind=AUTH_EXPIRED（结构化）")
+
+
 def main() -> int:
     test_warning_page_only()
     test_expired_session_page_is_not_reported_as_empty_courses()
     test_warning_after_normal_pages()
     test_exception_keeps_observed_pages()
+    test_captcha_during_fetch_is_typed_captcha()
+    test_session_expired_during_fetch_is_typed_auth_expired()
     print("=" * 60)
     print("风控警告采集层测试通过 ✅")
     return 0

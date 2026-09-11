@@ -183,6 +183,50 @@ def test_reused_supplement_page_is_reset_before_walking():
     assert any("第 1 页" in message for message in logs)
 
 
+def test_menu_without_table_interactive_is_transitioning():
+    """点击 Next 后常出现 menu 已渲染、table 未完、readyState=interactive。
+    必须归 TRANSITIONING，而不是凭菜单误判成 ELECTIVE_HOME，否则
+    walk_pages 会在一次正常但稍慢的翻页上过早失败。"""
+    saved = client.oc.eval_js
+    try:
+        client.oc.eval_js = lambda _session, _js: {
+            "url": "https://elective.pku.edu.cn/elective2008/...",
+            "ready_state": "interactive",
+            "has_login_form": False,
+            "has_elective_menu": True,
+            "has_course_table": False,
+            "session_expired": False,
+            "risk_warning": False,
+            "has_captcha": False,
+            "page": None,
+            "total_pages": None,
+        }
+        obs = client.detect_page("s")
+        assert obs.kind == client.PageKind.TRANSITIONING, obs.kind
+    finally:
+        client.oc.eval_js = saved
+
+    # 对照组：同样的 menu、但 table 已就绪 => 仍是 SUPPLEMENT（课程表优先）
+    try:
+        client.oc.eval_js = lambda _session, _js: {
+            "url": "https://elective.pku.edu.cn/...",
+            "ready_state": "complete",
+            "has_login_form": False,
+            "has_elective_menu": True,
+            "has_course_table": True,
+            "session_expired": False,
+            "risk_warning": False,
+            "has_captcha": False,
+            "page": 1,
+            "total_pages": 8,
+        }
+        obs = client.detect_page("s")
+        assert obs.kind == client.PageKind.SUPPLEMENT, obs.kind
+    finally:
+        client.oc.eval_js = saved
+    print("✓ menu=True+table=False+interactive -> TRANSITIONING（而非 ELECTIVE_HOME）；有表仍 SUPPLEMENT")
+
+
 def main() -> int:
     test_reuses_valid_session_without_login()
     test_session_expired_has_priority_over_supplement_url()
@@ -193,6 +237,7 @@ def main() -> int:
     test_prepare_fetch_context_runs_workflow_steps_in_order()
     test_prepare_fetch_context_logs_ready_state()
     test_reused_supplement_page_is_reset_before_walking()
+    test_menu_without_table_interactive_is_transitioning()
     print("登录会话复用单元测试通过 ✅")
     return 0
 
