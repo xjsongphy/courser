@@ -213,6 +213,24 @@ def test_risk_blocked_before_fetch_counts_as_hit():
     print("✓ 进入 fetch 前风控阻断：warning_hit=True（计入命中，不再误报“未触发”）")
 
 
+def test_hard_network_failure_fails_fast_not_zero_courses():
+    """抓取中断网/桥失效：PAGE_STATE_JS 的 eval 直接抛 OpenCliError（网络不可达）
+    必须快速失败（不干等 15~25s 超时、不伪装成 0 门课），且定为可重试的 BROWSER_ERROR。"""
+    from courser.models import FetchFailureKind
+
+    def page_state(s):
+        raise client.oc.OpenCliError(["browser", "s", "eval"], "{}", "网络不可达", 1)
+
+    harness = _OCHarness(
+        page_state=page_state,
+        extract=lambda s, i: (_ for _ in ()).throw(AssertionError("观测阶段就抛，不应进入提取")),
+    )
+    fr = _fetch(harness)
+    assert not fr.ok
+    assert fr.failure_kind == FetchFailureKind.BROWSER_ERROR, fr.failure_kind
+    print("✓ 抓取中断网：eval 抛错→快速失败 BROWSER_ERROR（不干等超时、不伪装 0 门课）")
+
+
 def main() -> int:
     test_warning_page_only()
     test_expired_session_page_is_not_reported_as_empty_courses()
@@ -221,6 +239,7 @@ def main() -> int:
     test_captcha_during_fetch_is_typed_captcha()
     test_session_expired_during_fetch_is_typed_auth_expired()
     test_risk_blocked_before_fetch_counts_as_hit()
+    test_hard_network_failure_fails_fast_not_zero_courses()
     print("=" * 60)
     print("风控警告采集层测试通过 ✅")
     return 0
