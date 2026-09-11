@@ -1,6 +1,15 @@
+<div align="center">
+
 # courser
 
-北大补退选课程名额监控工具。它在本机 Chrome 中登录选课系统，按设定间隔读取补退选列表；当符合条件的课程出现空余时，发一封邮件提醒。
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#)
+[![Python](https://img.shields.io/badge/python-%E2%89%A5%203.12-blue.svg)](https://www.python.org/)
+[![Built with Textual](https://img.shields.io/badge/built%20with-Textual-green.svg)](https://textual.textualize.io/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/xjsongphy/courser/blob/main/LICENSE)
+
+</div>
+
+北京大学补退选课程名额监控工具。它在本机 Chrome 中登录选课系统，按设定间隔读取补退选列表；当符合条件的课程出现空余时，发一封邮件提醒。
 
 它只做查询和提醒，不会替你选课，也不会处理验证码。
 
@@ -37,13 +46,12 @@ uv tool upgrade courser     # 若当初用 uv tool install
 git clone https://github.com/xjsongphy/courser
 cd courser
 uv sync
-cp config.example.json config.json
 uv run courser
 ```
 
-第一次启动会询问收件邮箱。其余设置可以在程序的设置页完成。
+第一次启动会打开设置向导：填写收件邮箱保存后会自动生成 `config.json`（**无需手动复制**），其余设置可在程序的设置页完成。
 
-若你更愿意由 Chrome 或密码管理器填充北大学号和密码，保持 `credentials` 为空即可；也可以写入 `config.json`，或通过环境变量 `PKU_USERNAME`、`PKU_PASSWORD` 提供。
+若你更愿意由 Chrome 或密码管理器填充学号和密码，保持 `credentials` 为空即可；也可以写入 `config.json`，或通过环境变量 `PKU_USERNAME`、`PKU_PASSWORD` 提供。
 
 ## What it does
 
@@ -64,26 +72,37 @@ uv run courser --once
 
 ## Configuration
 
-复制 `config.example.json` 得到 `config.json` 后，最常需要改的是下面几项：
+`config.json` 会在首次启动向导完成时自动生成，**一般情况下无需手动修改**——轮询节奏、筛选条件、收件邮箱等都可直接在 TUI 的设置页修改并自动保存。以下为完整的配置结构说明（参考）：
 
 ```jsonc
 {
-  "interval_min": 8.0,       // 查询间隔（分钟）
+  "interval_min": 8.0,          // 查询间隔（分钟）
+  "interval_jitter": 0.3,       // 间隔随机抖动
+  "page_delay_min": 0.8,        // 翻页最小等待（秒，人类节奏）
+  "page_delay_max": 2.0,        // 翻页最大等待（秒）
+  "session": "courser-watch",   // opencli 浏览器会话名
+  "window": "background",       // 浏览器窗口模式
+  "force_relogin": true,        // 每轮是否强制重新登录
+  "credentials": {              // 可留空（依赖浏览器密码管理器自动填充）
+    "username": "",
+    "password": ""
+  },
   "filters": {
-    "names": [],             // 课程名，支持子串匹配
-    "categories": [],        // 课程类别
+    "names": [],               // 课程名，子串匹配
+    "categories": [],          // 课程类别
     "depts": ["英语语言文学系"],
-    "match": "any"          // any：任一条件；all：全部条件
+    "match": "any"            // any：任一条件命中；all：全部条件命中
   },
   "notify": {
-    "to": "you@example.com",
-    "min_interval_min": 15.0,
-    "max_per_hour": 5
+    "to": "you@example.com",   // 收件邮箱（必填）
+    "gws_from": "",            // gws 发件账号（可选，默认取认证账号）
+    "min_interval_min": 15.0,  // 同一门课的通知冷却（分钟）
+    "max_per_hour": 5          // 每小时发送上限
   }
 }
 ```
 
-`config.json` 不会提交到 Git。运行日志写在 `data/courser.log`；登录、浏览器连接或邮件发送出问题时，先看这里。
+`config.json` 不会提交到 Git。运行日志写入 `data/courser.log`。
 
 ## Troubleshooting
 
