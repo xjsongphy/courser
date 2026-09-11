@@ -1528,7 +1528,6 @@ class CourserApp(App):
                 lines.append(_kv_row("邮箱", ui_value(self.cfg.notify.to), width=12, prefix="❯ "))
             else:
                 lines.append(_kv_row("邮箱", ui_warn("未填写"), width=12, prefix="❯ "))
-            lines.append("  " + ui_meta("回车 编辑收件邮箱 · Ctrl+S 保存并继续"))
         lines.append("")
         lines.append(ui_meta("学号 / 密码可留空：登录时由浏览器密码管理器自动填充。"))
         lines.append(ui_meta("也可稍后在主页按 s，在「设置 → 账号」中补充。"))
