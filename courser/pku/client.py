@@ -23,7 +23,7 @@ from typing import Callable, Optional
 
 from .. import opencli as oc
 from ..human import sleep_rand
-from ..models import Course, FetchError, FetchResult, LoginError
+from ..models import Course, FetchError, FetchFailureKind, FetchResult, LoginError
 from .extract import EXTRACT_JS, PAGE_STATE_JS
 from . import parser
 
@@ -62,12 +62,6 @@ class Progress:
 # ---------------------------------------------------------------------------
 # 页面在位检测 / 等待（四态）
 # ---------------------------------------------------------------------------
-
-PAGE_TABLE = "table"
-PAGE_WARNING = "warning"
-PAGE_AUTH_EXPIRED = "auth_expired"
-PAGE_TIMEOUT = "timeout"
-
 
 class PageKind(Enum):
     """浏览器页面的唯一分类；优先级由 detect_page 统一定义。"""
@@ -131,9 +125,9 @@ def detect_page(session: str) -> PageObservation:
         kind = PageKind.CAPTCHA
     elif risk:
         kind = PageKind.RISK_BLOCKED
-    elif login_form or "iaaa.pku.edu.cn" in url:
+    elif login_form:
         kind = PageKind.IAAA_LOGIN
-    elif table or "SupplyCancel" in url or "supplement" in url:
+    elif table:
         kind = PageKind.SUPPLEMENT
     elif menu:
         kind = PageKind.ELECTIVE_HOME
@@ -148,7 +142,7 @@ def detect_page(session: str) -> PageObservation:
 def wait_for_page(session: str, kinds: set[PageKind], timeout_s: float) -> PageObservation:
     """有限等待目标页面；每次动作后调用，不做后台常驻 DOM 轮询。"""
     deadline = time.time() + timeout_s
-    last = detect_page(session)
+    last = PageObservation(PageKind.UNKNOWN)
     while time.time() < deadline:
         last = detect_page(session)
         if last.kind in kinds:
@@ -157,33 +151,16 @@ def wait_for_page(session: str, kinds: set[PageKind], timeout_s: float) -> PageO
     return last
 
 
-def _page_state(session: str) -> tuple[bool, bool, bool]:
-    """返回 (课程表就绪, 明确风控警告, 会话已失效)。eval 异常按未就绪处理。"""
-    page = detect_page(session)
-    return (page.has_course_table, page.kind == PageKind.RISK_BLOCKED,
-            page.kind == PageKind.SESSION_EXPIRED)
-
-
-def _wait_page_state(session: str, timeout_s: float = 20.0,
-                     log: Optional[Callable[[str], None]] = None) -> str:
-    """等页面进入一种确定状态：课程表就绪 / 风控警告 / 会话失效 / 超时。
-
-    返回 PAGE_TABLE / PAGE_WARNING / PAGE_AUTH_EXPIRED / PAGE_TIMEOUT。
-    关键：既等课程表出现，也等**阻断性风控警告**出现。风控页会把课程表替换掉，
-    若只等课程表会一直等到超时而被误判成"0 页正常完成"（漏报甚至反向记 false）。
-    超时（既无课程表也无明确警告）视为“不知道发生了什么”，不计入风控样本。
-    """
+def wait_for_stable_page(session: str, timeout_s: float) -> PageObservation:
+    """等待页面离开过渡态；未知页超时后原样返回，交给业务层明确失败。"""
     deadline = time.time() + timeout_s
+    last = PageObservation(PageKind.UNKNOWN)
     while time.time() < deadline:
-        ready, warned, session_expired = _page_state(session)
-        if ready:
-            return PAGE_TABLE
-        if warned:
-            return PAGE_WARNING
-        if session_expired:
-            return PAGE_AUTH_EXPIRED
+        last = detect_page(session)
+        if last.kind not in (PageKind.TRANSITIONING, PageKind.UNKNOWN):
+            return last
         sleep_rand(0.5, 1.0)
-    return PAGE_TIMEOUT
+    return last
 
 
 def _on_workable_page(session: str) -> bool:
@@ -203,6 +180,21 @@ def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
 def _session_expired(session: str) -> bool:
     """是否为选课系统明确给出的「尚未登录/会话超时」页面。"""
     return detect_page(session).kind == PageKind.SESSION_EXPIRED
+
+
+def _failure_kind(exc: BaseException) -> FetchFailureKind:
+    text = str(exc)
+    if "验证码" in text or "二次验证" in text:
+        return FetchFailureKind.CAPTCHA
+    if "会话超时" in text or "尚未登录" in text:
+        return FetchFailureKind.AUTH_EXPIRED
+    if "风控" in text or "阻断" in text:
+        return FetchFailureKind.RISK_BLOCKED
+    if isinstance(exc, LoginError):
+        return FetchFailureKind.AUTH_FAILED
+    if isinstance(exc, oc.OpenCliError):
+        return FetchFailureKind.BROWSER_ERROR
+    return FetchFailureKind.PAGE_UNKNOWN
 
 
 def _login_error_text(session: str) -> str:
@@ -244,6 +236,10 @@ def ensure_login(session: str, creds: Optional[dict] = None,
             if prog:
                 prog.step("已复用现有登录会话")
             return "reuse_session"
+        if current.kind == PageKind.CAPTCHA:
+            raise LoginError("检测到验证码/二次验证，需要人工处理")
+        if current.kind == PageKind.RISK_BLOCKED:
+            raise FetchError("当前处于风控阻断页，停止本轮")
         expired = current.kind == PageKind.SESSION_EXPIRED
         if log:
             log("检测到选课会话已过期，点击「退出」回到登录页" if expired
@@ -612,26 +608,24 @@ def goto_supplement(session: str, window: Optional[str] = None,
             if page:
                 try:
                     oc.tab_select(session, page)
-                    observed = wait_for_page(session, {
-                        PageKind.SUPPLEMENT, PageKind.SESSION_EXPIRED,
-                        PageKind.RISK_BLOCKED, PageKind.CAPTCHA,
-                    }, timeout_s=6.0)
+                except oc.OpenCliError:
+                    pass
+                else:
+                    observed = wait_for_stable_page(session, timeout_s=6.0)
                     if observed.kind == PageKind.SUPPLEMENT:
                         return observed.url
+                    if observed.kind == PageKind.SESSION_EXPIRED:
+                        raise LoginError("补退选标签打开后提示会话超时")
+                    if observed.kind == PageKind.CAPTCHA:
+                        raise LoginError("补退选标签打开后出现验证码")
+                    if observed.kind == PageKind.RISK_BLOCKED:
+                        raise FetchError("补退选标签打开后触发风控")
                     raise FetchError(f"补退选标签未就绪（state={observed.kind.name}）")
-                except Exception:
-                    pass
             sleep_rand(0.8, 1.5)
         if attempt == 1:
             sleep_rand(1.5, 3.0)
     current = detect_page(session)
     raise FetchError(f"点击「补退选」后页面未变化（state={current.kind.name}, url={current.url or '?'})")
-
-
-_PAGER_PAGE_JS = (
-    r"(() => { const m = (document.body.innerText || '').match("
-    r"/Page\s+(\d+)\s+of\s+(\d+)/i); return m ? +m[1] : null; })()"
-)
 
 
 def _supplement_page_number(session: str) -> Optional[int]:
@@ -649,7 +643,16 @@ def reset_supplement_to_first_page(session: str,
     原地返回，但页面可能正停在最后一页。这里用分页器自身的 First/1 链接复位，
     不拼接 URL，也不绕过网站正常的翻页流程。
     """
-    current = _supplement_page_number(session)
+    observed = detect_page(session)
+    if observed.kind == PageKind.SESSION_EXPIRED:
+        raise LoginError("返回第一页前检测到“尚未登录或者会话超时”")
+    if observed.kind == PageKind.CAPTCHA:
+        raise LoginError("返回第一页前检测到验证码/二次验证")
+    if observed.kind == PageKind.RISK_BLOCKED:
+        raise FetchError("返回第一页前检测到风控阻断页")
+    if observed.kind != PageKind.SUPPLEMENT:
+        raise FetchError(f"无法重置补退选分页（state={observed.kind.name}）")
+    current = observed.page
     if current is None or current <= 1:
         return
     if log:
@@ -668,14 +671,23 @@ def reset_supplement_to_first_page(session: str,
             continue
         for _ in range(8):
             sleep_rand(0.4, 0.8)
-            page = _supplement_page_number(session)
-            if page == 1:
+            after = detect_page(session)
+            if after.kind == PageKind.SESSION_EXPIRED:
+                raise LoginError("返回第一页时会话已过期")
+            if after.kind == PageKind.CAPTCHA:
+                raise LoginError("返回第一页时出现验证码/二次验证")
+            if after.kind == PageKind.RISK_BLOCKED:
+                raise FetchError("返回第一页时触发风控阻断")
+            if after.kind != PageKind.SUPPLEMENT:
+                continue
+            if after.page == 1:
                 if log:
                     log("补退选列表已回到第 1 页")
                 return
 
     # 不允许把最后一页当成“只有一页”后静默成功，否则监控结果会不完整。
-    page = _supplement_page_number(session)
+    after = detect_page(session)
+    page = after.page if after.kind == PageKind.SUPPLEMENT else None
     raise FetchError(f"补退选列表无法回到第 1 页（当前第 {page or '?'} 页）")
 
 
@@ -744,11 +756,11 @@ def walk_pages(session: str, window: Optional[str] = None,
 
     while pages < max_pages:
         obs["pages"] = pages  # 本页之前已成功读到的页数（异常时也能带出）
-        # 先等页面进入确定状态：课程表就绪 或 明确风控警告（不是只等课程表，
-        # 否则风控页替换掉课程表时会等到超时而漏掉真正触发的警告）。
+        # 每页都重新观察完整状态；过渡/未知态只在有限时间内等待，返回后
+        # 由业务层显式处理 CAPTCHA、风控和未知页，不再统一压成 timeout。
         first = pages == 0
-        state = _wait_page_state(session, timeout_s=25.0 if first else 15.0, log=log)
-        if state == PAGE_WARNING:
+        observed = wait_for_stable_page(session, timeout_s=25.0 if first else 15.0)
+        if observed.kind == PageKind.RISK_BLOCKED:
             if log:
                 log("检测到风控阻断页（课程表消失 + 出现警告文案），本轮提前结束")
             warning_hit = True
@@ -756,17 +768,14 @@ def walk_pages(session: str, window: Optional[str] = None,
             meta["warning_hit"] = True
             meta["finished"] = True
             break
-        if state == PAGE_AUTH_EXPIRED:
+        if observed.kind == PageKind.SESSION_EXPIRED:
             # prepare_fetch_context 已有一次自动退出重登兜底；走到这里说明
             # 页面在抓取中再次失效，不能把它伪装成“0 门课程”。
             raise LoginError("补退选页提示“尚未登录或者会话超时”，本轮停止；下轮将重新登录")
-        if state == PAGE_TIMEOUT:
-            # 既没课程表也没明确警告：无法确定是"被拦"还是"没加载完"，不计入风控样本
-            if log:
-                log("页面长时间未就绪（无课程表、也无明确警告），本轮提前结束")
-            meta["finished"] = True
-            break
-        # state == PAGE_TABLE：正常课程表
+        if observed.kind == PageKind.CAPTCHA:
+            raise LoginError("补退选页检测到验证码/二次验证，需要人工处理")
+        if observed.kind != PageKind.SUPPLEMENT:
+            raise FetchError(f"补退选页未进入可用状态（state={observed.kind.name}, url={observed.url or '?'})")
 
         data = oc.eval_js(session, EXTRACT_JS)
         if not isinstance(data, dict):
@@ -870,6 +879,7 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     except (FetchError, oc.OpenCliError) as exc:
         result.ok = False
         result.error = str(exc)
+        result.failure_kind = _failure_kind(exc)
         # walk_pages 中途抛异常也要带回已观察的风控/页数状态，
         # 避免"已检查过几页却被当成 0 页无观察"漏记/误记风控样本。
         result.pages = obs.get("pages", result.pages)

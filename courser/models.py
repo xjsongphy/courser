@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Optional
 
 
@@ -28,6 +29,17 @@ class FetchError(RuntimeError):
 
 class LoginError(FetchError):
     """登录失败（可能需要验证码/二次验证，或账号问题）。"""
+
+
+class FetchFailureKind(Enum):
+    """供调度层使用的结构化失败原因，避免解析中文错误字符串。"""
+
+    AUTH_FAILED = auto()
+    AUTH_EXPIRED = auto()
+    CAPTCHA = auto()
+    RISK_BLOCKED = auto()
+    PAGE_UNKNOWN = auto()
+    BROWSER_ERROR = auto()
 
 
 @dataclass
@@ -76,6 +88,7 @@ class FetchResult:
     login_mode: str = ""          # login_click / sso_auto
     ok: bool = True
     error: str = ""
+    failure_kind: Optional[FetchFailureKind] = None
     cancelled: bool = False       # 用户主动停止本轮，不属于抓取故障
     warning_hit: bool = False     # 页面文本中检测到风控/警告提示语
     warning_checked: bool = False  # 本轮是否真正进入了补退选页面、并读取了至少一页文本

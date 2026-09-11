@@ -71,7 +71,7 @@ PAGE_STATE_JS = r"""
       { courseTable = true; break; }
   }
   const body = document.body.innerText || '';
-  const sessionExpired = /(您尚未登录(?:或者|或)?会话超时|尚未登录[^。]{0,20}会话超时|请重新登录)/.test(body);
+  const sessionExpired = /(您尚未登录(?:或者|或)?会话超时|尚未登录[^。]{0,20}会话超时)/.test(body);
   const riskWarning = !courseTable && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body);
   const pager = body.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
   return {
