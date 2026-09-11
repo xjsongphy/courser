@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
 
@@ -136,6 +136,18 @@ class Config:
             cfg.filters = Filters.from_dict(d.get("filters"))
             cfg.notify = Notify.from_dict(d.get("notify"))
         return cfg
+
+    def reload(self, path: Optional[Path] = None) -> None:
+        """重读磁盘上的配置并就地更新当前对象（不替换 self）。
+
+        用于让长时间运行的进程（TUI）感知外部对 config.json 的直接改动：
+        Scheduler 在每轮开跑前调用它，手动抓取（r）与周期轮询就都会采用最新配置。
+        之所以就地 setattr 而不是返回新 Config，是因为 Runner/Scheduler 持有同一个
+        cfg 引用，替换对象会让它们拿到旧对象；就地更新则保持一致。
+        """
+        fresh = Config.load(path or CONFIG_PATH)
+        for f in fields(self):
+            setattr(self, f.name, getattr(fresh, f.name))
 
     def save(self, path: Optional[Path] = None) -> None:
         path = path or CONFIG_PATH

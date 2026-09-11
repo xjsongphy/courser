@@ -57,10 +57,33 @@ def test_env_priority():
     print("✓ config：显式配置优先于环境变量")
 
 
+def test_reload_picks_up_external_edit():
+    """运行中外部改 config.json 后，reload() 应就地更新同一对象（config 热刷新）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="courser-reload-"))
+    p = tmp / "config.json"
+    cfg = Config()
+    cfg.credentials.username = "old_user"
+    cfg.interval_min = 99.0
+    cfg.save(p)
+    cfg.reload(p)
+    assert cfg.credentials.username == "old_user"
+
+    # 模拟外部进程直接改 config.json（这是 TUI 运行时最常见的情况）
+    p.write_text(json.dumps({"credentials": {"username": "new_user"},
+                             "interval_min": 3.5}), encoding="utf-8")
+    same_ref = cfg  # 记录同一对象引用，验证就地在原对象上更新
+    cfg.reload(p)
+    assert cfg is same_ref, "reload 不应替换对象引用"
+    assert cfg.credentials.username == "new_user", "应读到外部新值"
+    assert cfg.interval_min == 3.5
+    print("✓ config：运行中 reload() 感知外部改动（热刷新）")
+
+
 def main() -> int:
     test_load_save_roundtrip()
     test_bounds_and_missing()
     test_env_priority()
+    test_reload_picks_up_external_edit()
     print("=" * 60)
     print("config 单元测试通过 ✅")
     return 0

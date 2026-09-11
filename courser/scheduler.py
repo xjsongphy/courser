@@ -47,6 +47,9 @@ class MonitorScheduler:
     # -- 转发给 runner --------------------------------------------------
     def run_round(self, fetch_round: Optional[Callable] = None,
                   cancel_event: Optional[threading.Event] = None) -> RoundResult:
+        # 开跑前重读磁盘配置：感知运行期间外部对 config.json 的改动（手动 r 与
+        # 周期轮询都走这里）。就地 reload 让 runner 持有同一 cfg 引用同步生效。
+        self.cfg.reload()
         return self.runner.run_round(fetch_round=fetch_round,
                                      cancel_event=cancel_event)
 
