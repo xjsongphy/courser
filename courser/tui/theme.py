@@ -138,13 +138,6 @@ VerticalScroll:focus { border: none; }
 #courselist { height: 1fr; min-height: 1; margin: 0 0 1 0; overflow: hidden; }
 #coursehead { height: auto; margin: 0 0 1 0; }
 
-/* 次级页面：铺开成终端文本，不套 GUI 面板 */
-#page-logs, #page-help, #page-detail, #page-setup {
-    height: 1fr;
-    padding: 1 2;
-    border: none;
-}
-
 /* 筛选的候选列表与设置项相同：由真实 viewport 滚动，光标绝不越出页面。 */
 #page-filters {
     height: 1fr;
@@ -161,6 +154,14 @@ VerticalScroll:focus { border: none; }
     padding: 1 2;
     border: none;
     overflow: hidden;
+}
+
+/* 次级页面：铺开成终端文本，不套 GUI 面板；#keys 折行变高时要能随之收缩 */
+#page-logs, #page-help, #page-detail, #page-setup {
+    height: 1fr;
+    min-height: 0;
+    padding: 1 2;
+    border: none;
 }
 
 #filtersscroll, #logscroll, #helpscroll, #detscroll, #settingsscroll { height: 1fr; }
@@ -181,11 +182,15 @@ FocusScroll {
     scrollbar-corner-color: transparent;
 }
 
+/* 底部操作提示：窗口窄时自动折行（多行），不再把右侧裁掉。
+   高度自适应但设上限+内部滚动，避免极窄窗把上方正文挤没。 */
 #keys {
-    height: 1;
+    height: auto;
+    max-height: 4;
     padding: 0 4;
+    text-wrap: wrap;
     overflow-x: hidden;
-    overflow-y: hidden;
+    overflow-y: auto;
 }
 
 /* 底部的全局活动状态行：固定一行，左对齐到主内容区；

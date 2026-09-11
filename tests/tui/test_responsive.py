@@ -158,9 +158,41 @@ def test_seats_split_no_wrap():
     print("✓ 限/选 拆为独立列，各自右对齐、单一行不折行")
 
 
+async def test_keys_wrap_narrow():
+    """窄窗口底部 #keys 自动折行：右侧提示不再被裁掉，且主表/设置/帮助的
+    滚动区（真实 viewport 几何）随之收缩仍有效。"""
+    cfg = Config()
+    cfg.first_run_done = True
+    app = CourserApp(cfg)
+    async with app.run_test(size=(52, 22)) as p:
+        await p.pause(0.3)
+        app.courses = _mk_courses()
+        app._set_view("all")
+        app._render_main(force=True)
+        await p.pause(0.05)
+        keys = app.query_one("#keys")
+        assert keys.size.height > 1, f"窄窗应折行，keys 高度={keys.size.height}"
+        # 折行后尾部提示仍完整可见（未被右侧裁掉）
+        keytext = keys.render().plain
+        assert "退出" in keytext and keytext.rstrip().endswith("退出"), \
+            f"折行后应包含提示尾部（退出）：{keytext!r}"
+        # 课程区随之收缩：仍在 keys/activity 之上、高度>=1
+        cl = app.query_one("#courselist")
+        assert cl.content_region.height >= 1, "课程区不应被挤没"
+        # 不越屏：activity 底沿不超过窗口高度
+        assert app.query_one("#activity").content_region.bottom <= 22
+        # settings / help 滚动区仍有效（真实 viewport 几何自适应缩行）
+        app._show("settings"); await p.pause(0.05)
+        assert app.query_one("#settingsscroll").content_region.height >= 1
+        app._show("help"); await p.pause(0.05)
+        assert app.query_one("#helpscroll").content_region.height >= 1
+    print("✓ 窄窗 #keys 折行、右侧不裁；主表/设置/帮助滚动区自适应")
+
+
 async def main() -> int:
     await test_viewport_fill_and_arrow_stable()
     await test_search_exit_does_not_shrink()
+    await test_keys_wrap_narrow()
     test_seats_split_no_wrap()
 
     for w, h in _GEOMETRIES:
