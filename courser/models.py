@@ -43,6 +43,11 @@ class RiskBlockedError(FetchError):
     """命中风控阻断页，本轮停止。"""
 
 
+class PagerStuckError(FetchError):
+    """翻页未生效（单页重试达封顶，或本轮累计重试达预算）。
+    可恢复状态：由整轮重建重试覆盖（归入 PAGE_UNKNOWN）。"""
+
+
 class PageUnknownError(FetchError):
     """无法把当前页面归入已知工作状态（结构上不能进一步区分的原因）。"""
 
@@ -138,6 +143,8 @@ class RoundResult:
     matched: list = field(default_factory=list)
     notified: list = field(default_factory=list)
     duration_s: float = 0.0
+    retries: int = 0               # 本轮实际重试次数（仅可恢复失败会重试）
+    retry_exhausted: bool = False  # 连续可恢复失败达到本轮重试上限（r.ok=False，等下一轮）
     warning_hit: bool = False        # 页面检测到风控提示语
     risk_percent: int = 0            # 最近 N 次有效抓取中实际警告触发率（0~100）
     risk_label: str = "无"

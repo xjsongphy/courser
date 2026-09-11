@@ -84,32 +84,57 @@ def test_repeat_page_recovers_by_retry():
     assert fr.pages == 2, f"应抓到 2 页，实际 {fr.pages}"
     seqs = [c.seq for c in fr.courses]
     assert seqs == ["0001", "0002"], f"应按页序完整抓取且无重复，实际 {seqs}"
-    assert any("重试" in m for m in logs), f"应有重试日志，实际 {logs[:3]}"
+    assert any("仍在原页" in m for m in logs), f"应有重试日志，实际 {logs[:3]}"
     assert not any("提前结束" in m for m in logs), f"重试成功就不应提前结束，{logs}"
     print("✓ 重复页重试恢复：P1→(同页×2)→P2，抓全且不重复")
 
 
-def test_repeat_page_gives_up_after_retries():
-    """点 Next 后连续 _PAGER_RETRIES 次仍停在原页 → 本轮少抓 1 页结束，
-    不产生重复课程，也不死循环。"""
+def test_repeat_page_gives_up_after_page_window():
+    """单页窗口：同一页连续 _PAGER_RETRIES 次重试仍不变 → 本轮判失败
+    （不产生重复课程、不死循环；由整轮重建重试覆盖）。"""
     logs: list[str] = []
 
     def extract(_call):        # 永远同页
         return _page_data("0001", "课程1", has_next=True, cur=1, total=4)
 
     fr = _fetch(extract, log=logs.append)
-    assert fr.ok, "重复页放弃是正常收场（少抓几页），不是失败"
-    assert fr.pages == 1, f"重试用尽后应只有第 1 页，实际 {fr.pages}"
-    assert len(fr.courses) == 1, f"不应产生重复课程，实际 {len(fr.courses)}"
-    assert any("翻页未生效" in m for m in logs), f"应有放弃日志，{logs}"
-    print(f"✓ 重复页重试用尽放弃：pages=1、无重复、不循环（重试 {client._PAGER_RETRIES} 次）")
+    assert not fr.ok, "单页重试达上限应判本轮失败"
+    assert "翻页未生效" in fr.error, fr.error
+    assert fr.pages == 1, f"异常路径也应收回已读页数，实际 {fr.pages}"
+    assert fr.courses == [], "本轮判失败，部分页课程不带走（不发通知）"
+    print(f"✓ 单页窗口：连续 {client._PAGER_RETRIES} 次重试仍不变 → 本轮失败，无重复、不循环")
+
+
+def test_round_retry_budget_window():
+    """整轮窗口：没有任何一页单独触顶，但累计翻页重试达到整轮预算 → 本轮判失败。
+    模拟：每页容许 5 次重试（单页窗口很宽），但整轮预算只有 2 次，
+    第 2 次翻页重试就应触发预算上限（即使单页窗口远未触顶）。"""
+    saved = (client._PAGER_RETRIES, client._ROUND_PAGER_RETRIES)
+    client._PAGER_RETRIES = 5
+    client._ROUND_PAGER_RETRIES = 2
+    try:
+        logs: list[str] = []
+
+        def extract(_call):        # 永远同页
+            return _page_data("0001", "课程1", has_next=True, cur=1, total=4)
+
+        fr = _fetch(extract, log=logs.append)
+    finally:
+        client._PAGER_RETRIES, client._ROUND_PAGER_RETRIES = saved
+
+    assert not fr.ok, "整轮预算触顶应判本轮失败"
+    assert "本轮累计重试已达上限" in fr.error, fr.error
+    assert fr.pages == 1
+    print("✓ 整轮窗口：单页未触顶但累计达预算 → 本轮判失败（预算语义生效）")
 
 
 def main() -> int:
     test_repeat_page_recovers_by_retry()
-    test_repeat_page_gives_up_after_retries()
+    test_repeat_page_gives_up_after_page_window()
+    test_round_retry_budget_window()
     print("=" * 60)
-    print("翻页状态机重试测试通过 ✅")
+    print(f"翻页双层窗口测试通过 ✅（单页 {client._PAGER_RETRIES} 次 · "
+          f"整轮预算 {client._ROUND_PAGER_RETRIES} 次）")
     return 0
 
 

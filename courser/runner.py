@@ -40,6 +40,7 @@ class RoundRunner:
         self.on_progress = on_progress
         self.risk = RiskHistory(path=risk_store or RISK_FILE)
         self.retry_delay_range = (20.0, 40.0)  # 整轮抓取失败后的重试等待（秒，可覆写）
+        self.max_retries_per_round = 3        # 每轮可恢复失败最多重试 3 次，超过才结束本轮
         self.notify_store = notify_store or NotificationStateStore()
         self.budget_store = budget_store or SendBudgetStore()
         self._round_lock = threading.Lock()
@@ -143,40 +144,50 @@ class RoundRunner:
                 on_progress=_prog,
             )
             self._record_sample(fr)
-            # 失败重试机制：整轮失败且非风控提示时，等 20~40 秒重试一次
-            # （人类遇到失败也会再试一次；风控命中则绝不重试硬顶）。
-            # 但「登录未成功」是确定性失败（账号被拒/会话已失效/填值未触发框架），
-            # 原地重试只会重复一整轮慢登录（约 1~3 分钟）纯浪费 —— 不原地重试，
-            # 交给下一轮调度重试，并明确提示人工处理。
-            if not fr.ok and not fr.warning_hit and not fr.cancelled:
-                no_retry = {
-                    FetchFailureKind.AUTH_FAILED,
-                    FetchFailureKind.AUTH_EXPIRED,
-                    FetchFailureKind.CAPTCHA,
-                    FetchFailureKind.RISK_BLOCKED,
-                }
+            # 失败重试机制：整轮失败且非风控提示时，等 retry_delay_range 再抓一次，
+            # 最多重试 max_retries_per_round 次；达到上限 → 本轮结束（等待下一轮）。
+            # 「登录未成功」= 确定性失败（账号被拒/会话失效/验证码/风控），不原地重试，
+            # 避免重复一整轮慢登录（约 1~3 分钟）纯浪费——交给下一轮调度重试并提示人工处理。
+            no_retry = {
+                FetchFailureKind.AUTH_FAILED,
+                FetchFailureKind.AUTH_EXPIRED,
+                FetchFailureKind.CAPTCHA,
+                FetchFailureKind.RISK_BLOCKED,
+            }
+            retries = 0
+            while not (fr.ok or fr.warning_hit or fr.cancelled):
                 if fr.failure_kind in no_retry:
                     self.log(f"本轮失败：{fr.error}。该状态不适合原地重试，"
                              "等待下一轮重新建立页面状态；如有验证码/风控请先人工处理。")
-                else:
-                    self.log(f"本轮抓取失败：{fr.error}；等待约 "
-                             f"{self.retry_delay_range[0]:.0f}~{self.retry_delay_range[1]:.0f} "
-                             f"秒后重试一次…")
-                    if _prog:
-                        _prog(0, None, "本轮失败，等待片刻后重试…")
-                    if cancel_event and cancel_event.wait(
-                            random.uniform(*self.retry_delay_range)):
-                        raise opencli.OpenCliCancelled(["courser", "retry"])
-                    fr = fetch_round(
-                        session=self.cfg.session,
-                        creds=creds,
-                        window=self.cfg.window,
-                        pacing=self.cfg.pacing,
-                        force_logout=self.cfg.force_relogin,
-                        log=self.log,
-                        on_progress=_prog,
-                    )
-                    self._record_sample(fr)
+                    break
+                if retries >= self.max_retries_per_round:
+                    r.retry_exhausted = True
+                    self.log(f"✗ 已连续失败 {retries + 1} 次并达到本轮重试上限"
+                             f"（{self.max_retries_per_round} 次），本轮结束，等待下一轮。"
+                             f"最近一次失败：{fr.error}")
+                    break
+                retries += 1
+                r.retries = retries
+                self.log(f"本轮抓取失败：{fr.error}；等待约 "
+                         f"{self.retry_delay_range[0]:.0f}~{self.retry_delay_range[1]:.0f} "
+                         f"秒后重试（第 {retries}/{self.max_retries_per_round} 次）…")
+                if _prog:
+                    _prog(0, None, f"本轮失败，等待片刻后重试"
+                                   f"（{retries}/{self.max_retries_per_round}）…")
+                if cancel_event and cancel_event.wait(
+                        random.uniform(*self.retry_delay_range)):
+                    raise opencli.OpenCliCancelled(["courser", "retry"])
+                fr = fetch_round(
+                    session=self.cfg.session,
+                    creds=creds,
+                    window=self.cfg.window,
+                    pacing=self.cfg.pacing,
+                    force_logout=self.cfg.force_relogin,
+                    log=self.log,
+                    on_progress=_prog,
+                )
+                self._record_sample(fr)
+            r.retries = retries
 
             r.login_mode = fr.login_mode
             r.pages = fr.pages

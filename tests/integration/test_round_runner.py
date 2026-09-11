@@ -93,6 +93,7 @@ def test_warning_and_failure():
     _enable_fake_gws()
     SENT.clear()
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-")))
+    runner.retry_delay_range = (0.05, 0.1)  # 失败路径会有退避重试；测试里缩短，否则真等 20~40s
 
     def stub_warn(**k):
         fr = FetchResult(login_mode="login_click", pages=1, ok=True,
@@ -115,6 +116,23 @@ def test_warning_and_failure():
     # 登录失败没有机会观察风控，不计入有效样本分母
     assert runner.risk.evaluate() == (100, 1, 1), "未检查样本不应稀释触发率"
     print("✓ run：风控 rolling rate；登录失败不计有效样本 / 不发送且正常收尾")
+
+
+def test_retry_cap_exhausted():
+    """可恢复失败连续发生：重试达到本轮上限（3 次）后结束，不再无限重试。"""
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-cap-")))
+    runner.retry_delay_range = (0.05, 0.1)
+    calls = {"n": 0}
+
+    def always_fail(**k):
+        calls["n"] += 1
+        return FetchResult(login_mode="", pages=0, ok=False, error="网络抖了一下")
+
+    r = runner.run_round(fetch_round=always_fail)
+    assert not r.ok and r.retry_exhausted is True, "达到重试上限应标记 retry_exhausted"
+    assert r.retries == 3, f"应重试 3 次，实际 {r.retries}"
+    assert calls["n"] == 4, f"应初试 1 次 + 重试 3 次 = 4，实际 {calls['n']}"
+    print("✓ run：可恢复失败重试 3 次达上限 → 本轮结束，不无限重试")
 
 
 def test_round_callback_runs_after_timer_cleanup():
@@ -284,6 +302,7 @@ def main() -> int:
     test_cancel_interrupts_retry_wait()
     test_retry_and_no_retry_on_warning()
     test_typed_no_retry_runs_once()
+    test_retry_cap_exhausted()
     test_budget_and_snapshot()
     test_on_progress_callback()
     print("=" * 60)

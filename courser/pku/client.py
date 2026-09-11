@@ -25,7 +25,7 @@ from .. import opencli as oc
 from ..human import sleep_rand
 from ..models import (AuthExpiredError, CaptchaError, Course, FetchError,
                       FetchFailureKind, FetchResult, LoginError,
-                      PageUnknownError, RiskBlockedError)
+                      PageUnknownError, PagerStuckError, RiskBlockedError)
 from .extract import EXTRACT_JS, PAGE_STATE_JS
 from . import parser
 
@@ -741,9 +741,13 @@ def prepare_fetch_context(session: str, creds: Optional[dict] = None,
 # 动态翻页抓取（仅可用列表）
 # ---------------------------------------------------------------------------
 
-# 翻页状态机的重试次数：点 Next 后页面没变（重复页）或点击失败时，连续重试
-# 这么多次仍无效才结束本轮（状态机的意义就是重试）；硬停只留给风控警告/登录失效。
+# 翻页状态机重试窗口（两层，谁先触顶都判本轮失败）：
+# - _PAGER_RETRIES：单页窗口——同一页点 Next 后内容没变/点击失败，最多重试这么多次。
+# - _ROUND_PAGER_RETRIES：整轮窗口——所有页面累计的翻页重试总数上限；即使没有任何一页
+#   单独触顶，累计达到预算也判定本轮翻页失败（交给整轮重建重试覆盖）。
+# 硬停本轮只留给风控警告/登录失效。
 _PAGER_RETRIES = 3
+_ROUND_PAGER_RETRIES = 6
 
 
 def walk_pages(session: str, window: Optional[str] = None,
@@ -762,9 +766,12 @@ def walk_pages(session: str, window: Optional[str] = None,
     obs["pages"] = 0
     obs["warning_hit"] = False
 
-    # 翻页状态机：点 Next 后若页面没变（还在原页）或点击失败，按 _PAGER_RETRIES
-    # 重试数次（状态机的意义就是重试）；只有风控警告/登录失效/未知页才硬停本轮。
+    # 翻页状态机：点 Next 后若页面没变（还在原页）或点击失败，按两层窗口重试——
+    # 单页窗口 _PAGER_RETRIES · 整轮累计预算 _ROUND_PAGER_RETRIES；两者任一触顶
+    # 都抛 PagerStuckError 判本轮失败（可恢复，整轮重建重试覆盖）。
+    # 硬停本轮只留给风控警告/登录失效/未知页。
     pending: Optional[tuple] = None   # 翻页重试已读好的「下一页」，主循环直接消费
+    pager_retries = 0                 # 整轮累计翻页重试次数（跨页共享的两层窗口之总预算）
 
     def _observe_page():
         """观测 + 读取当前页。返回 ('ok', page_courses, pager, warned)；
@@ -796,9 +803,10 @@ def walk_pages(session: str, window: Optional[str] = None,
         return ("ok", page_courses, pager, warned)
 
     def _pager_advance(prev_sig: Optional[str]):
-        """点 Next 翻到下一页。点击失败或翻页后仍在原页（内容签名未变）时重试；
-        成功返回已读好的下一页 observe() 元组（主循环直接消费），重试用尽仍失败
-        返回 None（本轮到此为止，下一轮从第 1 页继续补全）。"""
+        """点 Next 翻到下一页。单页窗口（_PAGER_RETRIES）或整轮累计预算
+        （_ROUND_PAGER_RETRIES）任一触顶 → 抛 PagerStuckError（本轮失败）。
+        成功返回已读好的下一页 observe() 元组（主循环直接消费）。"""
+        nonlocal pager_retries
         before_next = detect_page(session)
         if before_next.kind == PageKind.SESSION_EXPIRED:
             raise AuthExpiredError("翻页前检测到“尚未登录或者会话超时”，本轮停止")
@@ -811,11 +819,17 @@ def walk_pages(session: str, window: Optional[str] = None,
                 sleep_rand(0.8, 1.5)
                 clicked = oc.click_by(session, role="link", name="Next")
             if not clicked:
+                pager_retries += 1
+                if pager_retries >= _ROUND_PAGER_RETRIES:
+                    raise PagerStuckError(
+                        f"翻页未生效（点击失败）：本轮累计重试已达上限"
+                        f"（{_ROUND_PAGER_RETRIES} 次）")
                 if log:
-                    log(f"翻页点击失败（第 {attempt + 1}/{_PAGER_RETRIES} 次尝试）…")
+                    log(f"翻页点击失败（单页第 {attempt + 1}/{_PAGER_RETRIES} 次，"
+                        f"累计 {pager_retries}/{_ROUND_PAGER_RETRIES}）…")
                 continue
             # 点击成功：多等一会儿让页面真正切换；若内容签名仍与上一页相同
-            # （还在原页/翻页未生效）→ 按状态机继续重试。
+            # （还在原页/翻页未生效）→ 累计一次并继续重试。
             sleep_rand(1.2, 2.2)
             shadow = _observe_page()
             if shadow[0] == "risk":
@@ -823,11 +837,16 @@ def walk_pages(session: str, window: Optional[str] = None,
             nxt_sig = parser._sig(shadow[1]) if shadow[1] else None
             if nxt_sig and nxt_sig != prev_sig:
                 return shadow        # 页面确实变了 → 接受这一页
+            pager_retries += 1
+            if pager_retries >= _ROUND_PAGER_RETRIES:
+                raise PagerStuckError(
+                    f"翻页未生效：本轮累计重试已达上限"
+                    f"（{_ROUND_PAGER_RETRIES} 次，无任何单页单独触顶也可能至此）")
             if log:
-                log(f"翻页后页面未变化（第 {attempt + 1}/{_PAGER_RETRIES} 次尝试），重试…")
-        if log:
-            log("翻页未生效（重复页/点击失败，已重试多次），本轮提前结束；下一轮从第 1 页继续")
-        return None
+                log(f"翻页后仍在原页（单页第 {attempt + 1}/{_PAGER_RETRIES} 次，"
+                    f"累计 {pager_retries}/{_ROUND_PAGER_RETRIES}）…")
+        raise PagerStuckError(
+            f"翻页未生效：同一页连续 {_PAGER_RETRIES} 次重试仍无变化，本轮失败")
 
     while pages < max_pages:
         obs["pages"] = pages  # 本页之前已成功读到的页数（异常时也能带出）
@@ -879,14 +898,10 @@ def walk_pages(session: str, window: Optional[str] = None,
             break
 
         # 翻页（点击 Next，绝不直接改 URL 跳页——易触发风控）。
-        # 点击失败/页面没变都按状态机重试；重试用尽 → 本轮少抓几页结束，
-        # 由下一轮从第 1 页继续补全。硬停只留给风控警告/登录失效/未知页。
-        shadow = _pager_advance(
+        # 单页窗口 + 整轮累计预算任一触顶 → PagerStuckError（本轮失败，
+        # 由整轮重建重试覆盖）；风控/登录失效照旧硬停。
+        pending = _pager_advance(
             parser._sig(page_courses) if page_courses else None)
-        if shadow is None:
-            meta["finished"] = True
-            break
-        pending = shadow
 
     meta["pages"] = pages
     meta["warning_hit"] = warning_hit
