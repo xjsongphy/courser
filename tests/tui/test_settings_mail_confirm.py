@@ -89,6 +89,9 @@ async def main() -> int:
     cfg = Config.load()
     cfg.first_run_done = True
     app = CourserApp(cfg)
+    # 注入超短超时：确认窗口 & 结果清除从默认 2s 压到 0.2s，测试不必真等 2 秒
+    app.TEST_MAIL_CONFIRM_TIMEOUT_S = 0.2
+    app.TEST_MAIL_RESULT_CLEAR_S = 0.2
     try:
         async with app.run_test(size=(120, 36)) as p:
             await p.pause(0.3)
@@ -106,7 +109,7 @@ async def main() -> int:
 
             # 首次回车 → 确认窗口：动作行转为「再次回车确认发送」
             await p.press("enter")
-            await p.pause(0.2)
+            await p.pause(0.05)   # 确认窗口注入 0.2s：短间隔断言，不与超时竞态
             assert app.sv.test_mail_armed_at is not None, "首次回车应进入确认窗口"
             body = _settings_text(app)
             assert "再次回车确认发送" in body, "动作行应提示再次回车确认发送"
@@ -141,8 +144,8 @@ async def main() -> int:
             joined = "\n".join(app.log_buf)
             assert "已发送" in joined, joined
 
-            # 2 秒后结果自动清除 → 恢复「回车发送」
-            await p.pause(2.2)
+            # 2 秒后结果自动清除 → 恢复「回车发送」（注入后为 0.2s）
+            await _wait_until(p, lambda: app.sv.test_mail_result is None)
             assert app.sv.test_mail_result is None, "结果应自动清除"
             assert "回车发送" in _settings_text(app), "应恢复普通「回车发送」"
             assert "发送成功" not in _settings_text(app)
@@ -156,6 +159,7 @@ async def main() -> int:
     cfg2 = Config.load()
     cfg2.first_run_done = True
     app2 = CourserApp(cfg2)
+    app2.TEST_MAIL_CONFIRM_TIMEOUT_S = 0.2   # 注入超短超时，压掉真实 2 秒等待
     async with app2.run_test(size=(120, 36)) as p2:
         await p2.pause(0.3)
         await _open_settings(p2)
@@ -164,12 +168,13 @@ async def main() -> int:
             await p2.press("down")
         await p2.pause(0.2)
         await p2.press("enter")
-        await p2.pause(0.2)
+        await p2.pause(0.05)   # 确认窗口注入 0.2s：短间隔断言，不与超时竞态
         assert app2.sv.test_mail_armed_at is not None
         assert "再次回车确认发送" in _settings_text(app2)
-        # 不再按键，等 2 秒超时
-        await p2.pause(2.4)
-        assert app2.sv.test_mail_armed_at is None, "2s 未确认应自动取消"
+        # 不再按键，等确认窗口超时自动取消（注入后为 0.2s）
+        await _wait_until(p2, lambda: app2.sv.test_mail_armed_at is None,
+                          timeout=2.0)
+        assert app2.sv.test_mail_armed_at is None, "未确认应自动取消"
         body = _settings_text(app2)
         assert "再次回车确认发送" not in body, "超时后应恢复正常提示"
         assert "↑↓ 选择" in _keys_text(app2), "超时后应恢复普通操作提示"

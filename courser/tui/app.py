@@ -147,6 +147,11 @@ class CourserApp(App):
     CSS = CSS
     BINDINGS = [Binding("ctrl+c", "quit", "退出", show=False, priority=True)]
 
+    # 测试可通过覆盖注入：把验证码确认窗口 / 结果自动清除的超时常压缩短，
+    # settings 测试就不必真等 2 秒（否则每次仅这两处就白耗 ~4.4s）。
+    TEST_MAIL_CONFIRM_TIMEOUT_S = 2.0   # 首回车后等二次确认的默认窗口
+    TEST_MAIL_RESULT_CLEAR_S = 2.0       # 发送结果展示后自动清除的默认时长
+
     def __init__(self, cfg: Config):
         # 空白区域使用终端自身的默认背景/调色板，不铺 Textual 深色主题底。
         super().__init__(ansi_color=True)
@@ -2001,7 +2006,8 @@ class CourserApp(App):
             return
 
         self.sv.test_mail_armed_at = time.time()
-        self.set_timer(2.0, self._expire_test_mail_confirm)
+        self.set_timer(self.TEST_MAIL_CONFIRM_TIMEOUT_S,
+                       self._expire_test_mail_confirm)
         self._render_settings_list()
 
     def _expire_test_mail_confirm(self) -> None:
@@ -2047,7 +2053,7 @@ class CourserApp(App):
         self.sv.test_mail_result = ok
         if self.page == "settings":
             self._render_settings_list()
-        self.set_timer(2.0, self._clear_test_mail_result)
+        self.set_timer(self.TEST_MAIL_RESULT_CLEAR_S, self._clear_test_mail_result)
 
     def _clear_test_mail_result(self) -> None:
         self.sv.test_mail_result = None
