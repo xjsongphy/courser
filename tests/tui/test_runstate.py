@@ -52,6 +52,10 @@ def test_runstate_status_words():
     retry = RoundResult(ok=False, retry_exhausted=True, error="x")
     assert "达到重试上限" in _line(app, _FakeWatcher(last=retry)), "重试达上限 → 红色提示"
 
+    from courser.models import FetchFailureKind
+    bu = RoundResult(ok=False, failure_kind=FetchFailureKind.BROWSER_UNAVAILABLE)
+    assert "浏览器不可用" in _line(app, _FakeWatcher(last=bu)), "浏览器桥不可用 → 红色提示"
+
     cancelled = RoundResult(ok=False, cancelled=True)
     assert "本轮已停止" in _line(app, _FakeWatcher(last=cancelled)), "用户停止 → 黄色"
 

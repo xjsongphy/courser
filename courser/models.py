@@ -61,6 +61,7 @@ class FetchFailureKind(Enum):
     RISK_BLOCKED = auto()
     PAGE_UNKNOWN = auto()
     BROWSER_ERROR = auto()
+    BROWSER_UNAVAILABLE = auto()   # Browser Bridge/Chrome 根本不可达：不重试、停止监控
 
 
 @dataclass
@@ -145,6 +146,7 @@ class RoundResult:
     duration_s: float = 0.0
     retries: int = 0               # 本轮实际重试次数（仅可恢复失败会重试）
     retry_exhausted: bool = False  # 连续可恢复失败达到本轮重试上限（r.ok=False，等下一轮）
+    failure_kind: Optional[FetchFailureKind] = None  # 从 FetchResult 透传，供 Scheduler 决策
     warning_hit: bool = False        # 页面检测到风控提示语
     risk_percent: int = 0            # 最近 N 次有效抓取中实际警告触发率（0~100）
     risk_label: str = "无"

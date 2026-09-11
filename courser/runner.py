@@ -153,12 +153,17 @@ class RoundRunner:
                 FetchFailureKind.AUTH_EXPIRED,
                 FetchFailureKind.CAPTCHA,
                 FetchFailureKind.RISK_BLOCKED,
+                FetchFailureKind.BROWSER_UNAVAILABLE,
             }
             retries = 0
             while not (fr.ok or fr.warning_hit or fr.cancelled):
                 if fr.failure_kind in no_retry:
-                    self.log(f"本轮失败：{fr.error}。该状态不适合原地重试，"
-                             "等待下一轮重新建立页面状态；如有验证码/风控请先人工处理。")
+                    if fr.failure_kind == FetchFailureKind.BROWSER_UNAVAILABLE:
+                        self.log("✗ OpenCLI/Chrome 浏览器桥不可用（登录前即失败），"
+                                 "本轮不重试；已通知调度停止监控，请先启动 Chrome/opencli")
+                    else:
+                        self.log(f"本轮失败：{fr.error}。该状态不适合原地重试，"
+                                 "等待下一轮重新建立页面状态；如有验证码/风控请先人工处理。")
                     break
                 if retries >= self.max_retries_per_round:
                     r.retry_exhausted = True
@@ -194,6 +199,7 @@ class RoundRunner:
             r.total = len(fr.courses)
             r.courses = fr.courses
             r.cancelled = fr.cancelled
+            r.failure_kind = fr.failure_kind
             r.warning_hit = fr.warning_hit
             if fr.warning_hit:
                 self.log("⚠ 检测到「请勿使用刷课机」类警告")

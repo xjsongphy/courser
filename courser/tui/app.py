@@ -50,7 +50,7 @@ from .. import notifier
 from ..config import Config, load_env_file
 from ..editing import FieldEditor
 from ..filters import FilterSet
-from ..models import Course, RoundResult
+from ..models import Course, FetchFailureKind, RoundResult
 from ..scheduler import MonitorScheduler
 from ..risk import RiskHistory, risk_label
 from ..course_table import (COURSE_COLUMNS, course_display, ordered_courses,
@@ -58,6 +58,7 @@ from ..course_table import (COURSE_COLUMNS, course_display, ordered_courses,
 from ..storage import RISK_FILE, SnapshotStore
 from .state import (EditingState, FilterViewState, MainViewState,
                     ProgressState, SettingsViewState)
+from .once_render import make_once_renderer
 from .theme import (ACCENT, COURSE_DETAIL_FIELDS, CSS, GROUPS, SEP, SETTINGS_FIELDS,
                     FocusScroll, FocusableStatic, _hint, _pad,
                     field_mutate, field_value, kv_row, page_hint, plain_markup,
@@ -1650,6 +1651,8 @@ class CourserApp(App):
             status = ui_meta("未开始")
         elif last.cancelled:
             status = ui_warn("本轮已停止")
+        elif last.failure_kind == FetchFailureKind.BROWSER_UNAVAILABLE:
+            status = ui_error("浏览器不可用")
         elif last.warning_hit:
             status = ui_error("触发风控")
         elif last.retry_exhausted:
@@ -2211,6 +2214,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                                  description="PKU 补退选空余名额监控（纯文本 TUI）")
     ap.add_argument("--once", action="store_true",
                     help="不启动 TUI，直接执行一轮抓取并打印结果（便于 cron/调试）")
+    ap.add_argument("--verbose", action="store_true",
+                    help="--once 时展示完整 workflow 明细（默认只显示高层阶段）")
     args = ap.parse_args(argv)
 
     load_env_file()
@@ -2218,23 +2223,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.once:
         # 非 TUI 的一次性运行：进度/日志走 stderr，结果走 stdout。
-        # 用 Rich 美化（非 TTY 时自动去色/去框线，便于 cron 与重定向）；主要产品仍是 TUI。
-        from rich.markup import escape
+        # TTY 下用 Rich Live 呈现「阶段状态区」（原地更新），
+        # 非 TTY（cron / 重定向）回退为逐行文本 + [courser] 前缀。
         err = Console(stderr=True, highlight=False)
         out = Console(highlight=False)
-
-        def cli_log(msg: str) -> None:
-            # escape 防注入：日志是明文，[] 应原样输出而非被当 Rich 样式
-            err.print(f"\\[courser] {escape(str(msg))}", soft_wrap=True)
-
-        def cli_progress(done, total, op):
-            # 与 TUI 相同：只写"正在做什么"；每条进度独立一行（不用 \r 覆盖）
-            err.print(f"\\[courser] {ui_meta(str(op))}", soft_wrap=True)
-
-        sched = MonitorScheduler(cfg, log=cli_log, on_progress=cli_progress)
-        r = sched.run_round()
+        renderer = make_once_renderer(err, out, args.verbose)
+        r = None
+        try:
+            sched = MonitorScheduler(cfg, log=renderer.log,
+                                     on_progress=renderer.progress)
+            r = sched.run_round()
+            renderer.finish(r)
+        finally:
+            renderer.stop()
         _render_once_result(out, r)
-        return 0 if r.ok else 2
+        return 0 if (r is not None and r.ok) else 2
 
     # mouse=True：由 Courser/Textual 接管鼠标——拖动=选择，松手=自动复制（OSC52），
     # 并恢复 Settings / Help / 日志 / 详情页的滚轮滚动。Textual 内部 selection 是

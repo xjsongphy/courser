@@ -295,6 +295,27 @@ def test_typed_no_retry_runs_once():
     print("✓ 结构化 no_retry：AUTH_EXPIRED 只调 fetch_round 一次（不靠中文字符串）")
 
 
+def test_browser_unavailable_no_retry_and_propagation():
+    """BROWSER_UNAVAILABLE 进 no_retry（不原地重试），且 failure_kind 从
+    FetchResult 透传到 RoundResult，供 Scheduler 停止监控。"""
+    from courser.models import FetchFailureKind
+    runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-bu-")))
+    calls = {"n": 0}
+
+    def stub(**k):
+        calls["n"] += 1
+        fr = FetchResult(login_mode="", pages=0, ok=False, error="桥不可达")
+        fr.failure_kind = FetchFailureKind.BROWSER_UNAVAILABLE
+        return fr
+
+    r = runner.run_round(fetch_round=stub)
+    assert calls["n"] == 1, f"BROWSER_UNAVAILABLE 不应原地重试，实际调用 {calls['n']} 次"
+    assert not r.ok and not r.retry_exhausted
+    assert r.failure_kind == FetchFailureKind.BROWSER_UNAVAILABLE, \
+        "failure_kind 应透传到 RoundResult 供调度层决策"
+    print("✓ BROWSER_UNAVAILABLE：不重试；failure_kind 贯通到 RoundResult")
+
+
 def main() -> int:
     test_full_round_and_cooldown()
     test_warning_and_failure()
@@ -302,6 +323,7 @@ def main() -> int:
     test_cancel_interrupts_retry_wait()
     test_retry_and_no_retry_on_warning()
     test_typed_no_retry_runs_once()
+    test_browser_unavailable_no_retry_and_propagation()
     test_retry_cap_exhausted()
     test_budget_and_snapshot()
     test_on_progress_callback()

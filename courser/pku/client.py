@@ -19,6 +19,7 @@ import json
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
+import subprocess
 from typing import Callable, Optional
 
 from .. import opencli as oc
@@ -97,13 +98,14 @@ def detect_page(session: str) -> PageObservation:
 
     所有会改变页面的动作前后都应调用本函数或 wait_for_page。尤其是
     SESSION_EXPIRED 必须压过 URL：选课系统的超时页会保留 supplement URL 和菜单。
+
+    Browser Bridge/Chrome 调用本身失败（OpenCliError / TimeoutExpired / 取消）
+    直接向上抛，绝不伪装成 UNKNOWN 页——否则「浏览器根本没连上」会与
+    「真的打开了一个未知网页」在页面状态层混在一起。
     """
-    try:
-        raw = oc.eval_js(session, PAGE_STATE_JS)
-    except Exception:
-        return PageObservation(PageKind.UNKNOWN)
+    raw = oc.eval_js(session, PAGE_STATE_JS)
     if not isinstance(raw, dict):
-        return PageObservation(PageKind.UNKNOWN)
+        raise FetchError(f"页面状态读取失败（非 JSON）：{raw!r}")
 
     def flag(name: str, legacy: str = "") -> bool:
         return bool(raw.get(name, raw.get(legacy, False)))
@@ -186,8 +188,15 @@ def _session_expired(session: str) -> bool:
     return detect_page(session).kind == PageKind.SESSION_EXPIRED
 
 
-def _failure_kind(exc: BaseException) -> FetchFailureKind:
-    """完全按异常类型分类，不再解析中文错误文本（中文可随意改，不影响控制流）。"""
+def _failure_kind(exc: BaseException, browser_ready: bool = True) -> FetchFailureKind:
+    """完全按异常类型分类，不再解析中文错误文本（中文可随意改，不影响控制流）。
+
+    browser_ready：本轮是否已经与浏览器成功交互过（跑完登录/进入补退选）。
+    - 还没连上浏览器就失败（OpenCliError / 超时）→ BROWSER_UNAVAILABLE：
+      状态机显式要求不原地重试、停止监控（Chrome/opencli 桥根本没起来）。
+    - 浏览器可用后的单条操作失败（OpenCliError）→ BROWSER_ERROR：可恢复，重试一次。
+    - 命令整体超时（如连 Chrome 一直等 60~120s）也归 BROWSER_UNAVAILABLE。
+    """
     if isinstance(exc, CaptchaError):
         return FetchFailureKind.CAPTCHA
     if isinstance(exc, AuthExpiredError):
@@ -196,8 +205,11 @@ def _failure_kind(exc: BaseException) -> FetchFailureKind:
         return FetchFailureKind.RISK_BLOCKED
     if isinstance(exc, LoginError):
         return FetchFailureKind.AUTH_FAILED
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return FetchFailureKind.BROWSER_UNAVAILABLE
     if isinstance(exc, oc.OpenCliError):
-        return FetchFailureKind.BROWSER_ERROR
+        return (FetchFailureKind.BROWSER_UNAVAILABLE if not browser_ready
+                else FetchFailureKind.BROWSER_ERROR)
     return FetchFailureKind.PAGE_UNKNOWN
 
 
@@ -920,10 +932,12 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
     result = FetchResult()
     prog = Progress(on_progress) if on_progress else None
     obs: dict = {}
+    browser_ready = False   # 是否已与浏览器成功交互（登录/进入补退选）；区分不可用 vs 单条操作失败
     try:
         result.login_mode = prepare_fetch_context(
             session, creds=creds, window=window,
             force_relogin=force_logout, log=log, prog=prog)
+        browser_ready = True
         result.courses, meta = walk_pages(session, window=window, pacing=pacing,
                                           log=log, prog=prog, obs=obs)
         result.pages = meta.get("pages", 0)
@@ -932,10 +946,10 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
         result.ok = False
         result.cancelled = True
         result.error = str(exc)
-    except (FetchError, oc.OpenCliError) as exc:
+    except (FetchError, oc.OpenCliError, subprocess.TimeoutExpired) as exc:
         result.ok = False
         result.error = str(exc)
-        result.failure_kind = _failure_kind(exc)
+        result.failure_kind = _failure_kind(exc, browser_ready=browser_ready)
         # walk_pages 中途抛异常也要带回已观察的风控/页数状态，
         # 避免"已检查过几页却被当成 0 页无观察"漏记/误记风控样本。
         result.pages = obs.get("pages", result.pages)
