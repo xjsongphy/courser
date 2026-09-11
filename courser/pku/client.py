@@ -741,6 +741,11 @@ def prepare_fetch_context(session: str, creds: Optional[dict] = None,
 # 动态翻页抓取（仅可用列表）
 # ---------------------------------------------------------------------------
 
+# 翻页状态机的重试次数：点 Next 后页面没变（重复页）或点击失败时，连续重试
+# 这么多次仍无效才结束本轮（状态机的意义就是重试）；硬停只留给风控警告/登录失效。
+_PAGER_RETRIES = 3
+
+
 def walk_pages(session: str, window: Optional[str] = None,
                pacing: tuple[float, float] = (0.8, 2.0),
                max_pages: int = 100,
@@ -750,7 +755,6 @@ def walk_pages(session: str, window: Optional[str] = None,
     courses: list[Course] = []
     pages = 0
     warning_hit = False
-    prev_signature: Optional[str] = None
     meta = {"pages": 0, "finished": False, "warning_hit": False}
     # obs 是「观察状态累加器」：即使 walk_pages 中途抛异常，fetch_round 也能从
     # obs 拿回已经看过的页数 / 是否命中警告，不会把"查过几页"误判成"0 页无观察"。
@@ -758,20 +762,18 @@ def walk_pages(session: str, window: Optional[str] = None,
     obs["pages"] = 0
     obs["warning_hit"] = False
 
-    while pages < max_pages:
-        obs["pages"] = pages  # 本页之前已成功读到的页数（异常时也能带出）
-        # 每页都重新观察完整状态；过渡/未知态只在有限时间内等待，返回后
-        # 由业务层显式处理 CAPTCHA、风控和未知页，不再统一压成 timeout。
+    # 翻页状态机：点 Next 后若页面没变（还在原页）或点击失败，按 _PAGER_RETRIES
+    # 重试数次（状态机的意义就是重试）；只有风控警告/登录失效/未知页才硬停本轮。
+    pending: Optional[tuple] = None   # 翻页重试已读好的「下一页」，主循环直接消费
+
+    def _observe_page():
+        """观测 + 读取当前页。返回 ('ok', page_courses, pager, warned)；
+        风控阻断页返回 ('risk', [], {}, False)。登录失效/验证码/未知页直接抛异常，
+        交 fetch_round → runner 的重试策略（确定性问题不原地重试）。"""
         first = pages == 0
         observed = wait_for_stable_page(session, timeout_s=25.0 if first else 15.0)
         if observed.kind == PageKind.RISK_BLOCKED:
-            if log:
-                log("检测到风控阻断页（课程表消失 + 出现警告文案），本轮提前结束")
-            warning_hit = True
-            obs["warning_hit"] = True
-            meta["warning_hit"] = True
-            meta["finished"] = True
-            break
+            return ("risk", [], {}, False)
         if observed.kind == PageKind.SESSION_EXPIRED:
             # prepare_fetch_context 已有一次自动退出重登兜底；走到这里说明
             # 页面在抓取中再次失效，不能把它伪装成“0 门课程”。
@@ -779,8 +781,8 @@ def walk_pages(session: str, window: Optional[str] = None,
         if observed.kind == PageKind.CAPTCHA:
             raise CaptchaError("补退选页检测到验证码/二次验证，需要人工处理")
         if observed.kind != PageKind.SUPPLEMENT:
-            raise PageUnknownError(f"补退选页未进入可用状态（state={observed.kind.name}, url={observed.url or '?'})")
-
+            raise PageUnknownError(
+                f"补退选页未进入可用状态（state={observed.kind.name}, url={observed.url or '?'})")
         data = oc.eval_js(session, EXTRACT_JS)
         if not isinstance(data, dict):
             raise FetchError("页面提取失败：eval 未返回 JSON")
@@ -791,6 +793,59 @@ def walk_pages(session: str, window: Optional[str] = None,
             data = oc.eval_js(session, EXTRACT_JS)
             if isinstance(data, dict):
                 page_courses, pager, warned = parser.parse_page(data)
+        return ("ok", page_courses, pager, warned)
+
+    def _pager_advance(prev_sig: Optional[str]):
+        """点 Next 翻到下一页。点击失败或翻页后仍在原页（内容签名未变）时重试；
+        成功返回已读好的下一页 observe() 元组（主循环直接消费），重试用尽仍失败
+        返回 None（本轮到此为止，下一轮从第 1 页继续补全）。"""
+        before_next = detect_page(session)
+        if before_next.kind == PageKind.SESSION_EXPIRED:
+            raise AuthExpiredError("翻页前检测到“尚未登录或者会话超时”，本轮停止")
+        if before_next.kind != PageKind.SUPPLEMENT:
+            raise PageUnknownError(f"翻页前页面状态异常（state={before_next.kind.name}）")
+        for attempt in range(_PAGER_RETRIES):
+            sleep_rand(*pacing)
+            clicked = oc.click_by(session, role="link", name="Next")
+            if not clicked:
+                sleep_rand(0.8, 1.5)
+                clicked = oc.click_by(session, role="link", name="Next")
+            if not clicked:
+                if log:
+                    log(f"翻页点击失败（第 {attempt + 1}/{_PAGER_RETRIES} 次尝试）…")
+                continue
+            # 点击成功：多等一会儿让页面真正切换；若内容签名仍与上一页相同
+            # （还在原页/翻页未生效）→ 按状态机继续重试。
+            sleep_rand(1.2, 2.2)
+            shadow = _observe_page()
+            if shadow[0] == "risk":
+                return shadow        # 风控页：交主循环统一收尾（硬停本轮）
+            nxt_sig = parser._sig(shadow[1]) if shadow[1] else None
+            if nxt_sig and nxt_sig != prev_sig:
+                return shadow        # 页面确实变了 → 接受这一页
+            if log:
+                log(f"翻页后页面未变化（第 {attempt + 1}/{_PAGER_RETRIES} 次尝试），重试…")
+        if log:
+            log("翻页未生效（重复页/点击失败，已重试多次），本轮提前结束；下一轮从第 1 页继续")
+        return None
+
+    while pages < max_pages:
+        obs["pages"] = pages  # 本页之前已成功读到的页数（异常时也能带出）
+        if pending is not None:
+            kind, page_courses, pager, warned = pending
+            pending = None
+        else:
+            kind, page_courses, pager, warned = _observe_page()
+
+        if kind == "risk":
+            if log:
+                log("检测到风控阻断页（课程表消失 + 出现警告文案），本轮提前结束")
+            warning_hit = True
+            obs["warning_hit"] = True
+            meta["warning_hit"] = True
+            meta["finished"] = True
+            break
+
         if prog is not None:
             tot = (pager.get("total") if pager.get("total") else None) or None
             if prog.total is None and tot:
@@ -808,14 +863,6 @@ def walk_pages(session: str, window: Optional[str] = None,
         pages += 1
         obs["pages"] = pages
 
-        # 同页重复护栏：翻页点击失败时可能停在原页，连续两页内容完全一样就停
-        if pages >= 2 and page_courses and prev_signature == parser._sig(page_courses):
-            if log:
-                log("检测到重复页（翻页未生效），本轮提前结束")
-            meta["finished"] = True
-            break
-        prev_signature = parser._sig(page_courses) if page_courses else prev_signature
-
         if log:
             log(f"第 {pages} 页：{len(page_courses)} 门课（累计 {len(courses)}）")
 
@@ -831,25 +878,15 @@ def walk_pages(session: str, window: Optional[str] = None,
             meta["finished"] = True
             break
 
-        # 用「点击 Next」翻页——绝不直接改 URL 跳页（易触发风控）。
-        # 点击失败：再点一次作为重试；仍失败则本轮到这里为止（少抓几页，
-        # 保持"一切操作都是点击"），由下一轮继续。
-        before_next = detect_page(session)
-        if before_next.kind == PageKind.SESSION_EXPIRED:
-            raise AuthExpiredError("翻页前检测到“尚未登录或者会话超时”，本轮停止")
-        if before_next.kind != PageKind.SUPPLEMENT:
-            raise PageUnknownError(f"翻页前页面状态异常（state={before_next.kind.name}）")
-        sleep_rand(*pacing)
-        clicked = oc.click_by(session, role="link", name="Next")
-        if not clicked:
-            sleep_rand(0.8, 1.5)
-            clicked = oc.click_by(session, role="link", name="Next")
-        if not clicked:
-            if log:
-                log("翻页点击失败，本轮提前结束（不直接跳 URL）")
+        # 翻页（点击 Next，绝不直接改 URL 跳页——易触发风控）。
+        # 点击失败/页面没变都按状态机重试；重试用尽 → 本轮少抓几页结束，
+        # 由下一轮从第 1 页继续补全。硬停只留给风控警告/登录失效/未知页。
+        shadow = _pager_advance(
+            parser._sig(page_courses) if page_courses else None)
+        if shadow is None:
             meta["finished"] = True
             break
-        sleep_rand(0.8, 1.8)
+        pending = shadow
 
     meta["pages"] = pages
     meta["warning_hit"] = warning_hit
