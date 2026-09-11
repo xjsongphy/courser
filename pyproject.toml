@@ -1,6 +1,6 @@
 [project]
 name = "courser"
-version = "0.1.1"
+version = "0.1.2"
 description = "PKU 补退选空余名额监控：opencli 驱动后台 Chrome，人类节奏轮询，命中筛选即邮件提醒（纯文本持久监控 TUI）"
 readme = "README.md"
 requires-python = ">=3.12"
