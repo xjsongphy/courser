@@ -1633,18 +1633,26 @@ class CourserApp(App):
         return " │ ".join(seg)
 
     def _activity_steady(self, w) -> str:
-        """监控等待 / 空闲（含失败）（实时活动）：• 状态 <状态> │ 下一轮 <时刻>。
-        历史事实（最近抓取/数据/上次发信）一律归顶部稳定摘要，底部只回答
-        程序现在在干什么。"""
+        """监控等待 / 空闲（实时活动）：• 状态 <上一轮结果> │ 下一轮 <时刻>。
+        只报状态，不重复页数/课程数——那是顶部 Hero 的职责。
+        状态语义：监控中(绿) / 成功抓取(绿) / 触发风控(红) / 达到重试上限(红) /
+        抓取失败(红) / 本轮已停止(黄) / 未开始(灰)。"""
         anchor = ui_meta("• 状态")
+        last = w.last_result if w else None
         if w and w.running:
             status = ui_ok("监控中")
-        elif w and w.last_result and w.last_result.cancelled:
+        elif last is None:
+            status = ui_meta("未开始")
+        elif last.cancelled:
             status = ui_warn("本轮已停止")
-        elif w and w.last_result and not w.last_result.ok:
+        elif last.warning_hit:
+            status = ui_error("触发风控")
+        elif last.retry_exhausted:
+            status = ui_error("达到重试上限")
+        elif not last.ok:
             status = ui_error("抓取失败")
         else:
-            status = ui_meta("未开始")
+            status = ui_ok("成功抓取")
         seg = [f"{anchor}  {status}"]
         nxt = self._next_round_text(w)
         seg.append(f"{ui_meta('下一轮')} "
