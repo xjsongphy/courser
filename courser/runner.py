@@ -40,7 +40,7 @@ class RoundRunner:
         self.on_progress = on_progress
         self.risk = RiskHistory(path=risk_store or RISK_FILE)
         self.retry_delay_range = (20.0, 40.0)  # 整轮抓取失败后的重试等待（秒，可覆写）
-        self.max_retries_per_round = 3        # 每轮可恢复失败最多重试 3 次，超过才结束本轮
+        self.max_retries_per_round = 2        # 每轮可恢复失败最多重试 2 次，超过才结束本轮
         self.notify_store = notify_store or NotificationStateStore()
         self.budget_store = budget_store or SendBudgetStore()
         self._round_lock = threading.Lock()

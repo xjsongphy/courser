@@ -119,7 +119,7 @@ def test_warning_and_failure():
 
 
 def test_retry_cap_exhausted():
-    """可恢复失败连续发生：重试达到本轮上限（3 次）后结束，不再无限重试。"""
+    """可恢复失败连续发生：重试达到本轮上限（2 次）后结束，不再无限重试。"""
     runner = _make_runner(Path(tempfile.mkdtemp(prefix="rrunner-cap-")))
     runner.retry_delay_range = (0.05, 0.1)
     calls = {"n": 0}
@@ -130,9 +130,9 @@ def test_retry_cap_exhausted():
 
     r = runner.run_round(fetch_round=always_fail)
     assert not r.ok and r.retry_exhausted is True, "达到重试上限应标记 retry_exhausted"
-    assert r.retries == 3, f"应重试 3 次，实际 {r.retries}"
-    assert calls["n"] == 4, f"应初试 1 次 + 重试 3 次 = 4，实际 {calls['n']}"
-    print("✓ run：可恢复失败重试 3 次达上限 → 本轮结束，不无限重试")
+    assert r.retries == 2, f"应重试 2 次，实际 {r.retries}"
+    assert calls["n"] == 3, f"应初试 1 次 + 重试 2 次 = 3，实际 {calls['n']}"
+    print("✓ run：可恢复失败重试 2 次达上限 → 本轮结束，不无限重试")
 
 
 def test_round_callback_runs_after_timer_cleanup():
