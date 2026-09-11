@@ -102,13 +102,27 @@ def test_warning_page_only():
     print("✓ 纯警告页：warning_hit=True, warning_checked=True, pages=0")
 
 
+def test_expired_session_page_is_not_reported_as_empty_courses():
+    """会话超时页应立即失败，让下轮重登；不能等 25 秒后报 0 门课。"""
+    harness = _OCHarness(
+        page_state={"ready": False, "warning": False, "session_expired": True},
+        extract=lambda s, i: (_ for _ in ()).throw(AssertionError("超时页不应执行 EXTRACT_JS")),
+    )
+    fr = _fetch(harness)
+    assert not fr.ok
+    assert "会话超时" in fr.error
+    assert fr.pages == 0 and fr.warning_checked is False
+    print("✓ 会话超时页：立即识别为登录失效，不误报 0 门课程")
+
+
 def test_warning_after_normal_pages():
     """前 3 页正常、第 4 页风控阻断 → warning_hit=True 而非机会性漏掉。"""
     state_calls = {"n": 0}
 
     def page_state(s):
         state_calls["n"] += 1
-        if state_calls["n"] >= 4:           # 第 4 页触发风控、课程表消失
+        # 每次翻页前也会 observe 一次：P1 前/P1 后/P2 前/P2 后/P3 前/P3 后/P4。
+        if state_calls["n"] >= 7:           # 第 4 页触发风控、课程表消失
             return {"ready": False, "warning": True}
         return {"ready": True, "warning": False}
 
@@ -146,6 +160,7 @@ def test_exception_keeps_observed_pages():
 
 def main() -> int:
     test_warning_page_only()
+    test_expired_session_page_is_not_reported_as_empty_courses()
     test_warning_after_normal_pages()
     test_exception_keeps_observed_pages()
     print("=" * 60)

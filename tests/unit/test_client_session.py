@@ -13,46 +13,86 @@ os.environ["COURSER_CONFIG"] = str(Path(tempfile.mkdtemp()) / "config.json")
 from courser.pku import client  # noqa: E402
 
 
+def _page(kind, *, page=None):
+    return client.PageObservation(kind=kind, page=page)
+
+
 def test_reuses_valid_session_without_login():
-    original_probe, original_login = client._on_workable_page, client.login
+    original_detect, original_login = client.detect_page, client.login
     try:
-        client._on_workable_page = lambda _session: True
+        client.detect_page = lambda _session: _page(client.PageKind.ELECTIVE_HOME)
         client.login = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("有效会话不应进入登录流程"))
         logs = []
         mode = client.ensure_login("test", force_relogin=False, log=logs.append)
     finally:
-        client._on_workable_page, client.login = original_probe, original_login
+        client.detect_page, client.login = original_detect, original_login
 
     assert mode == "reuse_session"
     assert any("复用当前会话" in message for message in logs)
 
 
+def test_session_expired_has_priority_over_supplement_url():
+    """超时提示必须压过仍残留的 supplement URL 和菜单。"""
+    original_eval = client.oc.eval_js
+    try:
+        client.oc.eval_js = lambda *_args, **_kwargs: {
+            "url": "https://elective.pku.edu.cn/elective2008/.../supplement.jsp",
+            "has_elective_menu": True,
+            "has_course_table": False,
+            "session_expired": True,
+            "risk_warning": False,
+            "has_login_form": False,
+            "has_captcha": False,
+        }
+        observed = client.detect_page("test")
+    finally:
+        client.oc.eval_js = original_eval
+
+    assert observed.kind == client.PageKind.SESSION_EXPIRED
+
+
 def test_invalid_session_falls_back_to_login():
-    original_probe, original_login = client._on_workable_page, client.login
+    original_detect, original_login = client.detect_page, client.login
     calls = []
     try:
-        client._on_workable_page = lambda _session: False
+        client.detect_page = lambda _session: _page(client.PageKind.UNKNOWN)
         client.login = lambda *_args, **kwargs: calls.append(kwargs) or "login_click"
         mode = client.ensure_login("test", force_relogin=False)
     finally:
-        client._on_workable_page, client.login = original_probe, original_login
+        client.detect_page, client.login = original_detect, original_login
 
     assert mode == "login_click"
     assert calls == [{"creds": None, "window": None, "force_logout": False,
                       "log": None, "prog": None}]
 
 
+def test_expired_session_exits_before_relogin():
+    """过期页保留 supplement URL 时，也必须退出旧会话后再登录。"""
+    original_detect, original_login = client.detect_page, client.login
+    calls, logs = [], []
+    try:
+        client.detect_page = lambda _session: _page(client.PageKind.SESSION_EXPIRED)
+        client.login = lambda *_args, **kwargs: calls.append(kwargs) or "login_click"
+        mode = client.ensure_login("test", force_relogin=False, log=logs.append)
+    finally:
+        client.detect_page, client.login = original_detect, original_login
+
+    assert mode == "login_click"
+    assert calls[0]["force_logout"] is True
+    assert any("会话已过期" in message for message in logs)
+
+
 def test_force_relogin_skips_session_probe():
-    original_probe, original_login = client._on_workable_page, client.login
+    original_detect, original_login = client.detect_page, client.login
     calls = []
     try:
-        client._on_workable_page = lambda _session: (_ for _ in ()).throw(
+        client.detect_page = lambda _session: (_ for _ in ()).throw(
             AssertionError("强制重登不应探测会话"))
         client.login = lambda *_args, **kwargs: calls.append(kwargs) or "login_click"
         mode = client.ensure_login("test", force_relogin=True)
     finally:
-        client._on_workable_page, client.login = original_probe, original_login
+        client.detect_page, client.login = original_detect, original_login
 
     assert mode == "login_click"
     assert calls == [{"creds": None, "window": None, "force_logout": True,
@@ -121,19 +161,20 @@ def test_prepare_fetch_context_logs_ready_state():
 
 
 def test_reused_supplement_page_is_reset_before_walking():
-    original_eval = client.oc.eval_js
+    original_detect = client.detect_page
     original_click = client.oc.click_by
     original_sleep = client.sleep_rand
     try:
-        pages = iter([8, 1])
-        client.oc.eval_js = lambda *_args, **_kwargs: next(pages)
+        pages = iter([_page(client.PageKind.SUPPLEMENT, page=8),
+                      _page(client.PageKind.SUPPLEMENT, page=1)])
+        client.detect_page = lambda *_args, **_kwargs: next(pages)
         clicks = []
         client.oc.click_by = lambda *_args, **kwargs: clicks.append(kwargs) or True
         client.sleep_rand = lambda *_args: None
         logs = []
         client.reset_supplement_to_first_page("test", log=logs.append)
     finally:
-        client.oc.eval_js = original_eval
+        client.detect_page = original_detect
         client.oc.click_by = original_click
         client.sleep_rand = original_sleep
 
@@ -144,7 +185,9 @@ def test_reused_supplement_page_is_reset_before_walking():
 
 def main() -> int:
     test_reuses_valid_session_without_login()
+    test_session_expired_has_priority_over_supplement_url()
     test_invalid_session_falls_back_to_login()
+    test_expired_session_exits_before_relogin()
     test_force_relogin_skips_session_probe()
     test_fetch_round_routes_through_ensure_login()
     test_prepare_fetch_context_runs_workflow_steps_in_order()

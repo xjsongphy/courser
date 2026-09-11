@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Callable, Optional
 
 from .. import opencli as oc
@@ -58,56 +60,135 @@ class Progress:
 
 
 # ---------------------------------------------------------------------------
-# 页面在位检测 / 等待（三态）
+# 页面在位检测 / 等待（四态）
 # ---------------------------------------------------------------------------
 
-PAGE_TABLE = "table"      # 课程表已就绪，可以正常提取
-PAGE_WARNING = "warning"  # 明确命中风控阻断页（课程表消失 + 警告文案）
-PAGE_TIMEOUT = "timeout"  # 既无课程表也无明确警告：无法确定状态
+PAGE_TABLE = "table"
+PAGE_WARNING = "warning"
+PAGE_AUTH_EXPIRED = "auth_expired"
+PAGE_TIMEOUT = "timeout"
 
 
-def _page_state(session: str) -> tuple[bool, bool]:
-    """返回 (课程表就绪, 明确风控警告)。eval 异常按未就绪处理。"""
+class PageKind(Enum):
+    """浏览器页面的唯一分类；优先级由 detect_page 统一定义。"""
+
+    IAAA_LOGIN = auto()
+    ELECTIVE_HOME = auto()
+    SUPPLEMENT = auto()
+    SESSION_EXPIRED = auto()
+    RISK_BLOCKED = auto()
+    CAPTCHA = auto()
+    TRANSITIONING = auto()
+    UNKNOWN = auto()
+
+
+@dataclass(frozen=True)
+class PageObservation:
+    kind: PageKind
+    url: str = ""
+    has_login_form: bool = False
+    has_elective_menu: bool = False
+    has_course_table: bool = False
+    session_expired: bool = False
+    risk_warning: bool = False
+    captcha: bool = False
+    page: Optional[int] = None
+    total_pages: Optional[int] = None
+
+
+def detect_page(session: str) -> PageObservation:
+    """读取一次 DOM evidence，并以固定优先级归类当前页面。
+
+    所有会改变页面的动作前后都应调用本函数或 wait_for_page。尤其是
+    SESSION_EXPIRED 必须压过 URL：选课系统的超时页会保留 supplement URL 和菜单。
+    """
     try:
-        r = oc.eval_js(session, PAGE_STATE_JS)
-        if isinstance(r, dict):
-            return bool(r.get("ready")), bool(r.get("warning"))
+        raw = oc.eval_js(session, PAGE_STATE_JS)
     except Exception:
-        pass
-    return False, False
+        return PageObservation(PageKind.UNKNOWN)
+    if not isinstance(raw, dict):
+        return PageObservation(PageKind.UNKNOWN)
+
+    def flag(name: str, legacy: str = "") -> bool:
+        return bool(raw.get(name, raw.get(legacy, False)))
+
+    url = str(raw.get("url") or "")
+    login_form = flag("has_login_form")
+    menu = flag("has_elective_menu")
+    table = flag("has_course_table", "ready")
+    expired = flag("session_expired")
+    risk = flag("risk_warning", "warning")
+    captcha = flag("has_captcha")
+    page = raw.get("page")
+    total = raw.get("total_pages")
+    page = page if isinstance(page, int) and not isinstance(page, bool) else None
+    total = total if isinstance(total, int) and not isinstance(total, bool) else None
+
+    # 先看阻断态，再看工作态。这样 URL 即使仍是 supplement，也不会压过超时页。
+    if expired:
+        kind = PageKind.SESSION_EXPIRED
+    elif captcha:
+        kind = PageKind.CAPTCHA
+    elif risk:
+        kind = PageKind.RISK_BLOCKED
+    elif login_form or "iaaa.pku.edu.cn" in url:
+        kind = PageKind.IAAA_LOGIN
+    elif table or "SupplyCancel" in url or "supplement" in url:
+        kind = PageKind.SUPPLEMENT
+    elif menu:
+        kind = PageKind.ELECTIVE_HOME
+    elif raw.get("ready_state") in ("loading", "interactive"):
+        kind = PageKind.TRANSITIONING
+    else:
+        kind = PageKind.UNKNOWN
+    return PageObservation(kind, url, login_form, menu, table, expired, risk,
+                           captcha, page, total)
+
+
+def wait_for_page(session: str, kinds: set[PageKind], timeout_s: float) -> PageObservation:
+    """有限等待目标页面；每次动作后调用，不做后台常驻 DOM 轮询。"""
+    deadline = time.time() + timeout_s
+    last = detect_page(session)
+    while time.time() < deadline:
+        last = detect_page(session)
+        if last.kind in kinds:
+            return last
+        sleep_rand(0.5, 1.0)
+    return last
+
+
+def _page_state(session: str) -> tuple[bool, bool, bool]:
+    """返回 (课程表就绪, 明确风控警告, 会话已失效)。eval 异常按未就绪处理。"""
+    page = detect_page(session)
+    return (page.has_course_table, page.kind == PageKind.RISK_BLOCKED,
+            page.kind == PageKind.SESSION_EXPIRED)
 
 
 def _wait_page_state(session: str, timeout_s: float = 20.0,
                      log: Optional[Callable[[str], None]] = None) -> str:
-    """等页面进入一种确定状态：课程表就绪 / 明确风控警告 / 超时。
+    """等页面进入一种确定状态：课程表就绪 / 风控警告 / 会话失效 / 超时。
 
-    返回 PAGE_TABLE / PAGE_WARNING / PAGE_TIMEOUT。
+    返回 PAGE_TABLE / PAGE_WARNING / PAGE_AUTH_EXPIRED / PAGE_TIMEOUT。
     关键：既等课程表出现，也等**阻断性风控警告**出现。风控页会把课程表替换掉，
     若只等课程表会一直等到超时而被误判成"0 页正常完成"（漏报甚至反向记 false）。
     超时（既无课程表也无明确警告）视为“不知道发生了什么”，不计入风控样本。
     """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        ready, warned = _page_state(session)
+        ready, warned, session_expired = _page_state(session)
         if ready:
             return PAGE_TABLE
         if warned:
             return PAGE_WARNING
+        if session_expired:
+            return PAGE_AUTH_EXPIRED
         sleep_rand(0.5, 1.0)
     return PAGE_TIMEOUT
 
 
 def _on_workable_page(session: str) -> bool:
-    """确认已登录且进入可用页面：出现补退选菜单链接，或已在补退选页。"""
-    try:
-        ok = oc.eval_js(
-            session,
-            r"(() => !!document.querySelector('a[href*=\"SupplyCancel.do\"]') "
-            r"|| /SupplyCancel|supplement/i.test(location.href))()",
-        )
-        return ok is True
-    except Exception:
-        return False
+    """兼容包装：登录成功只接受 canonical 的选课工作态。"""
+    return detect_page(session).kind in (PageKind.ELECTIVE_HOME, PageKind.SUPPLEMENT)
 
 
 def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
@@ -117,6 +198,11 @@ def _poll_landed(session: str, timeout_s: float = 40.0) -> bool:
         if _on_workable_page(session):
             return True
     return False
+
+
+def _session_expired(session: str) -> bool:
+    """是否为选课系统明确给出的「尚未登录/会话超时」页面。"""
+    return detect_page(session).kind == PageKind.SESSION_EXPIRED
 
 
 def _login_error_text(session: str) -> str:
@@ -147,26 +233,46 @@ def ensure_login(session: str, creds: Optional[dict] = None,
 
     ``force_relogin`` 是显式的例外：用于账号切换或排障时，每轮先登出再登录。
     """
+    expired = False
     if not force_relogin:
         if prog:
             prog.step("检查现有登录状态…")
-        if _on_workable_page(session):
+        current = detect_page(session)
+        if current.kind in (PageKind.ELECTIVE_HOME, PageKind.SUPPLEMENT):
             if log:
                 log("已检测到有效 PKU 登录状态，复用当前会话")
             if prog:
                 prog.step("已复用现有登录会话")
             return "reuse_session"
+        expired = current.kind == PageKind.SESSION_EXPIRED
         if log:
-            log("未检测到有效登录状态，进入登录流程")
+            log("检测到选课会话已过期，点击「退出」回到登录页" if expired
+                else "未检测到有效登录状态，进入登录流程")
     return login(session, creds=creds, window=window,
-                 force_logout=force_relogin, log=log, prog=prog)
+                 # 过期提示页仍有旧菜单和 URL；先从其「退出」入口清掉旧会话，
+                 # 避免 IAAA 又用残留 SSO 状态跳回同一张提示页。
+                 force_logout=force_relogin or expired, log=log, prog=prog)
+
+
+def _logout_to_login(session: str, window: Optional[str] = None) -> str:
+    """优先点击选课页的「退出」，失败才回退到其官方登出地址。"""
+    try:
+        if oc.click_by(session, role="link", name="退出"):
+            sleep_rand(0.8, 1.6)
+            return "click"
+    except Exception:
+        pass
+    try:
+        oc.open(session, LOGOUT_URL, window=window)
+        sleep_rand(0.8, 1.6)
+        return "url"
+    except Exception:
+        return "failed"
+
 
 def _form_present(session: str) -> bool:
     """登录表单是否在位（#logon_button 存在）。页面重定向进行中时可能短暂缺失。"""
-    try:
-        return oc.eval_js(session, "(() => !!document.querySelector('#logon_button'))()") is True
-    except Exception:
-        return False
+    return detect_page(session).has_login_form
 
 
 def _click_logon(session: str) -> bool:
@@ -306,25 +412,29 @@ def login(session: str, creds: Optional[dict] = None, window: Optional[str] = No
     for attempt in (1, 2):
         if force_logout and attempt == 1:
             # 先登出，确保这一轮真的重新登录（重试时不重复登出，减少流量）
-            try:
-                oc.open(session, LOGOUT_URL, window=window)
-                sleep_rand(0.8, 1.6)
-            except Exception:
-                pass
+            logout_method = _logout_to_login(session, window=window)
+            if log:
+                log("已点击选课页面「退出」，准备重新登录" if logout_method == "click"
+                    else "选课页「退出」不可用，已通过登出地址回到登录页"
+                    if logout_method == "url" else "登出旧会话未确认，继续打开登录页")
             if prog:
                 prog.step("登出旧会话")
         oc.open(session, LOGIN_URL, window=window)
-        sleep_rand(1.5, 3.5)  # 给密码管理器自动填充留时间
-
-        url = oc.get_url(session)
-        if "elective.pku.edu.cn" in url:
-            # 可能是中转页：等几秒确认没有回弹回登录页
-            sleep_rand(2.0, 3.0)
-            if _on_workable_page(session):
-                if prog:
-                    prog.step("已通过会话直接进入选课系统")
-                return "sso_auto"
-            # 回弹到了登录表单，落到下面正常登录流程
+        # open 后先观察实际落点：OAuth 可能直接 SSO 放行，也可能回到登录表单。
+        landed = wait_for_page(session, {
+            PageKind.IAAA_LOGIN, PageKind.ELECTIVE_HOME, PageKind.SUPPLEMENT,
+            PageKind.SESSION_EXPIRED, PageKind.CAPTCHA,
+        }, timeout_s=8.0)
+        if landed.kind in (PageKind.ELECTIVE_HOME, PageKind.SUPPLEMENT):
+            if prog:
+                prog.step("已通过会话直接进入选课系统")
+            return "sso_auto"
+        if landed.kind == PageKind.SESSION_EXPIRED:
+            login_errs.append("打开 IAAA 后仍落在选课会话超时页")
+            continue
+        if landed.kind == PageKind.CAPTCHA:
+            login_errs.append("登录页出现验证码/二次验证")
+            continue
 
         # 等登录表单就位（重定向进行中 #logon_button 可能短暂不存在）
         deadline = time.time() + 12.0
@@ -460,9 +570,13 @@ def _find_supplement_tab(session: str) -> Optional[str]:
 def goto_supplement(session: str, window: Optional[str] = None,
                     log: Optional[Callable[[str], None]] = None,
                     prog: Optional[Progress] = None) -> str:
-    url = oc.get_url(session)
-    if "SupplyCancel" in url or "supplement" in url:
-        return url
+    current = detect_page(session)
+    if current.kind == PageKind.SUPPLEMENT:
+        return current.url
+    if current.kind == PageKind.SESSION_EXPIRED:
+        raise LoginError("进入补退选前检测到“尚未登录或者会话超时”")
+    if current.kind not in (PageKind.ELECTIVE_HOME, PageKind.TRANSITIONING):
+        raise FetchError(f"无法从当前页面进入补退选（state={current.kind.name}, url={current.url or '?'})")
     # 点左侧菜单（#menu）里的「补退选」入口，避免点到选课时间表里的同名链接
     for attempt in (1, 2):
         try:
@@ -481,27 +595,37 @@ def goto_supplement(session: str, window: Optional[str] = None,
             continue
         if log:
             log(f"已点击「补退选」（第 {attempt} 次）")
-        # 确认页面发生预期变化：当前页或新标签进入补退选页；否则重试点击
+        # 点击后按 canonical classifier 等待；不能用 URL 片段当作成功证据。
         deadline = time.time() + (16.0 if attempt == 1 else 20.0)
         while time.time() < deadline:
-            sleep_rand(0.8, 1.5)
-            cur = oc.get_url(session)
-            if "SupplyCancel" in cur or "supplement" in cur:
+            observed = detect_page(session)
+            if observed.kind == PageKind.SUPPLEMENT:
                 if prog:
                     prog.step("已进入补退选页")
                 sleep_rand(1.0, 2.0)
-                return cur
+                return observed.url
+            if observed.kind == PageKind.SESSION_EXPIRED:
+                raise LoginError("点击「补退选」后提示“尚未登录或者会话超时”")
+            if observed.kind in (PageKind.RISK_BLOCKED, PageKind.CAPTCHA):
+                raise FetchError(f"点击「补退选」后被阻断（state={observed.kind.name}）")
             page = _find_supplement_tab(session)
             if page:
                 try:
                     oc.tab_select(session, page)
-                    sleep_rand(1.0, 2.0)
-                    return oc.get_url(session)
+                    observed = wait_for_page(session, {
+                        PageKind.SUPPLEMENT, PageKind.SESSION_EXPIRED,
+                        PageKind.RISK_BLOCKED, PageKind.CAPTCHA,
+                    }, timeout_s=6.0)
+                    if observed.kind == PageKind.SUPPLEMENT:
+                        return observed.url
+                    raise FetchError(f"补退选标签未就绪（state={observed.kind.name}）")
                 except Exception:
                     pass
+            sleep_rand(0.8, 1.5)
         if attempt == 1:
             sleep_rand(1.5, 3.0)
-    raise FetchError(f"点击「补退选」后页面未变化，当前 url={oc.get_url(session)}")
+    current = detect_page(session)
+    raise FetchError(f"点击「补退选」后页面未变化（state={current.kind.name}, url={current.url or '?'})")
 
 
 _PAGER_PAGE_JS = (
@@ -512,11 +636,8 @@ _PAGER_PAGE_JS = (
 
 def _supplement_page_number(session: str) -> Optional[int]:
     """返回补退选列表当前页；页面尚未渲染分页器时返回 ``None``。"""
-    try:
-        value = oc.eval_js(session, _PAGER_PAGE_JS)
-    except Exception:
-        return None
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    observed = detect_page(session)
+    return observed.page if observed.kind == PageKind.SUPPLEMENT else None
 
 
 def reset_supplement_to_first_page(session: str,
@@ -575,10 +696,23 @@ def prepare_fetch_context(session: str, creds: Optional[dict] = None,
         mode_label = "复用已有会话" if login_mode == "reuse_session" else "重新登录"
         log(f"抓取准备：登录状态={mode_label}")
 
-    supplement_url = goto_supplement(
-        session, window=window, log=log, prog=prog)
-    if log:
-        log(f"抓取准备：补退选页面={supplement_url}")
+    try:
+        supplement_url = goto_supplement(
+            session, window=window, log=log, prog=prog)
+    except LoginError:
+        # SSO cookie 有时只在补退选接口被访问时才暴露为过期。准备阶段可以
+        # 恢复一次；抓取阶段则由 walk_pages 作废整轮，下一轮从第 1 页重新开始。
+        if log:
+            log("补退选页提示会话超时，点击「退出」后重新登录")
+        login_mode = login(session, creds=creds, window=window,
+                           force_logout=True, log=log, prog=prog)
+        supplement_url = goto_supplement(
+            session, window=window, log=log, prog=prog)
+        if log:
+            log(f"抓取准备：重新登录后补退选页面={supplement_url}")
+    else:
+        if log:
+            log(f"抓取准备：补退选页面={supplement_url}")
 
     reset_supplement_to_first_page(session, log=log, prog=prog)
     if log:
@@ -622,6 +756,10 @@ def walk_pages(session: str, window: Optional[str] = None,
             meta["warning_hit"] = True
             meta["finished"] = True
             break
+        if state == PAGE_AUTH_EXPIRED:
+            # prepare_fetch_context 已有一次自动退出重登兜底；走到这里说明
+            # 页面在抓取中再次失效，不能把它伪装成“0 门课程”。
+            raise LoginError("补退选页提示“尚未登录或者会话超时”，本轮停止；下轮将重新登录")
         if state == PAGE_TIMEOUT:
             # 既没课程表也没明确警告：无法确定是"被拦"还是"没加载完"，不计入风控样本
             if log:
@@ -683,6 +821,11 @@ def walk_pages(session: str, window: Optional[str] = None,
         # 用「点击 Next」翻页——绝不直接改 URL 跳页（易触发风控）。
         # 点击失败：再点一次作为重试；仍失败则本轮到这里为止（少抓几页，
         # 保持"一切操作都是点击"），由下一轮继续。
+        before_next = detect_page(session)
+        if before_next.kind == PageKind.SESSION_EXPIRED:
+            raise LoginError("翻页前检测到“尚未登录或者会话超时”，本轮停止")
+        if before_next.kind != PageKind.SUPPLEMENT:
+            raise FetchError(f"翻页前页面状态异常（state={before_next.kind.name}）")
         sleep_rand(*pacing)
         clicked = oc.click_by(session, role="link", name="Next")
         if not clicked:

@@ -53,22 +53,41 @@ EXTRACT_JS = r"""
 })()
 """
 
-# 页面在位状态检测（三态）用于等待页面的判定：正常课程表 / 明确阻断警告 / 超时。
-# 必须【同时等课程表 和 阻断性风控警告】——风控阻断页会把课程表替换掉，
-# 若只等课程表会一直等到超时而被误判成"0 页正常完成"。
+# 统一页面证据。这里只读取 DOM，不在 JS 中决定 workflow；页面优先级和状态转移
+# 统一由 client.detect_page() 决定，避免各个 workflow 各自以 URL/局部 selector 猜状态。
 PAGE_STATE_JS = r"""
 (() => {
+  const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+  const visible = el => {
+    if (!el) return false;
+    const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+  };
   const tb = [...document.querySelectorAll('table')];
-  let ready = false;
+  let courseTable = false;
   for (const t of tb) {
-    const cs = [...t.querySelectorAll('th,td')].map(c => (c.textContent || '').trim());
+    const cs = [...t.querySelectorAll('th,td')].map(c => norm(c.textContent));
     if (cs.some(x => x.includes('课程号')) && cs.some(x => x.includes('限数')))
-      { ready = true; break; }
+      { courseTable = true; break; }
   }
-  // 与 EXTRACT_JS 同源：仅当课程表消失且出现风控文案才算真的被拦
-  // （选课页常驻"请勿使用刷课机"提示条，不能因静态文案误报）。
   const body = document.body.innerText || '';
-  const warning = !ready && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body);
-  return { ready, warning };
+  const sessionExpired = /(您尚未登录(?:或者|或)?会话超时|尚未登录[^。]{0,20}会话超时|请重新登录)/.test(body);
+  const riskWarning = !courseTable && /(刷课机|过于频繁|频率过高|操作频繁|风控|异常访问|请勿使用)/.test(body);
+  const pager = body.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
+  return {
+    url: location.href,
+    ready_state: document.readyState,
+    has_login_form: visible(document.querySelector('#logon_button')),
+    has_elective_menu: !!document.querySelector('#menu a[href*="SupplyCancel.do"], a[href*="SupplyCancel.do"]'),
+    has_course_table: courseTable,
+    session_expired: sessionExpired,
+    risk_warning: riskWarning,
+    has_captcha: visible(document.querySelector('#code_area')),
+    page: pager ? +pager[1] : null,
+    total_pages: pager ? +pager[2] : null,
+    // 兼容旧调用方/测试；新代码应读取上面的 evidence 字段。
+    ready: courseTable,
+    warning: riskWarning,
+  };
 })()
 """
