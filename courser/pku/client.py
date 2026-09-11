@@ -888,8 +888,10 @@ def fetch_round(session: str, creds: Optional[dict] = None, window: Optional[str
         # 避免"已检查过几页却被当成 0 页无观察"漏记/误记风控样本。
         result.pages = obs.get("pages", result.pages)
         result.warning_hit = obs.get("warning_hit", result.warning_hit)
-    # 是否「有效抓取」：有确定观察结果——真正进入补退选页读到 ≥1 页，
-    # OR 明确命中风控阻断警告（警告页 pages 可能为 0，但这恰是最该计入的样本）。
-    # 只有这类 attempt 才计入风控触发率分母；登录失败/页面空白超时等无观察的不计入。
+    # —— 风控命中/有效观察的总判定（穷尽）：failure_kind 是枚举，任何异常都唯一落到其中一种
+    #    warning_hit：观测到风控警告，或本次失败类型即为 RISK_BLOCKED（进入 fetch 前被
+    #    风控阻断也计入命中，而非日志里"风控阻断页"却"未触发刷课机警告"自相矛盾）。
+    result.warning_hit = result.warning_hit or result.failure_kind == FetchFailureKind.RISK_BLOCKED
+    #    成功读到 ≥1 页，或明确了风控命中，才是有观察机会的有效样本（计入风控分母）。
     result.warning_checked = result.warning_hit or result.pages >= 1
     return result

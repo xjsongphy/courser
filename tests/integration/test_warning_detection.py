@@ -184,6 +184,35 @@ def test_session_expired_during_fetch_is_typed_auth_expired():
     print("✓ 抓取中会话超时：failure_kind=AUTH_EXPIRED（结构化）")
 
 
+def test_risk_blocked_before_fetch_counts_as_hit():
+    """进入 fetch 前(ensure_login/detect_page)就被风控阻断：failure_kind=RISK_BLOCKED。
+    必须记成 warning_hit=True——否则会同时打出"本轮失败：当前处于风控阻断页"却
+    "本次：未触发刷课机警告"的矛盾日志，并漏记一次真实风控样本。"""
+    from courser.models import FetchFailureKind, RiskBlockedError
+    saved = (client.prepare_fetch_context, client.oc.eval_js,
+             client.oc.click_by, client.sleep_rand)
+
+    def raise_risk(*_a, **_k):
+        raise RiskBlockedError("当前处于风控阻断页，停止本轮")
+
+    client.prepare_fetch_context = raise_risk
+    client.oc.eval_js = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("不应再走到页面读取"))
+    client.oc.click_by = lambda *a, **k: True
+    client.sleep_rand = lambda *a, **k: 0.0
+    try:
+        fr = client.fetch_round(session="s")
+    finally:
+        (client.prepare_fetch_context, client.oc.eval_js,
+         client.oc.click_by, client.sleep_rand) = saved
+
+    assert not fr.ok
+    assert fr.failure_kind == FetchFailureKind.RISK_BLOCKED, fr.failure_kind
+    assert fr.warning_hit is True and fr.warning_checked is True, \
+        (fr.warning_hit, fr.warning_checked)
+    print("✓ 进入 fetch 前风控阻断：warning_hit=True（计入命中，不再误报“未触发”）")
+
+
 def main() -> int:
     test_warning_page_only()
     test_expired_session_page_is_not_reported_as_empty_courses()
@@ -191,6 +220,7 @@ def main() -> int:
     test_exception_keeps_observed_pages()
     test_captcha_during_fetch_is_typed_captcha()
     test_session_expired_during_fetch_is_typed_auth_expired()
+    test_risk_blocked_before_fetch_counts_as_hit()
     print("=" * 60)
     print("风控警告采集层测试通过 ✅")
     return 0
