@@ -64,7 +64,7 @@ def _install_fake_gws(app) -> dict:
     """注入带可控时延的假 gws 发送：记录调用、阻塞片刻，返回成功。
     这样能稳定验证「发送中…」窗口与后台线程不阻塞 UI。"""
     app.sd["to"] = "test@example.com"
-    state = {"calls": 0, "gate": 0.4}
+    state = {"calls": 0, "gate": 1.5}
 
     def fake_gws_available() -> bool:
         return True
