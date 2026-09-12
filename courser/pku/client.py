@@ -618,8 +618,10 @@ def goto_supplement(session: str, window: Optional[str] = None,
                 return observed.url
             if observed.kind == PageKind.SESSION_EXPIRED:
                 raise AuthExpiredError("点击「补退选」后提示“尚未登录或者会话超时”")
-            if observed.kind in (PageKind.RISK_BLOCKED, PageKind.CAPTCHA):
-                raise RiskBlockedError(f"点击「补退选」后被阻断（state={observed.kind.name}）")
+            if observed.kind == PageKind.CAPTCHA:
+                raise CaptchaError("点击「补退选」后出现验证码/二次验证")
+            if observed.kind == PageKind.RISK_BLOCKED:
+                raise RiskBlockedError("点击「补退选」后触发风控阻断")
             page = _find_supplement_tab(session)
             if page:
                 try:

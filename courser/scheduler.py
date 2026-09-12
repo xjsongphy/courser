@@ -113,13 +113,6 @@ class MonitorScheduler:
                 self.log("✗ OpenCLI/Chrome 浏览器桥不可用：停止监控；"
                          "请确保 Chrome/opencli 已启动后再重新开始")
                 break
-            last = self.last_result
-            if last and last.failure_kind == FetchFailureKind.BROWSER_UNAVAILABLE:
-                # 浏览器桥/Chrome 根本不可达：再等下一轮只会重复同样的慢登录/超时，
-                # 且原地重试也已显式禁止——直接停止监控，提示先修环境。
-                self.log("✗ OpenCLI/Chrome 浏览器桥不可用：停止监控；"
-                         "请确保 Chrome/opencli 已启动后再重新开始")
-                break
             break_secs = self._maybe_break(self.last_result)
             if break_secs:
                 self.next_round_ts = time.time() + break_secs

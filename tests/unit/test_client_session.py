@@ -227,6 +227,27 @@ def test_menu_without_table_interactive_is_transitioning():
     print("✓ menu=True+table=False+interactive -> TRANSITIONING（而非 ELECTIVE_HOME）；有表仍 SUPPLEMENT")
 
 
+def test_goto_supplement_captcha_is_not_risk_blocked():
+    """点击补退选后出现验证码必须保留 CAPTCHA 语义，不能误记为风控。"""
+    saved = (client.detect_page, client.oc.click, client.sleep_rand)
+    states = iter([
+        _page(client.PageKind.ELECTIVE_HOME),
+        _page(client.PageKind.CAPTCHA),
+    ])
+    try:
+        client.detect_page = lambda *_args, **_kwargs: next(states)
+        client.oc.click = lambda *_args, **_kwargs: {"clicked": True, "matches_n": 1}
+        client.sleep_rand = lambda *_args, **_kwargs: None
+        try:
+            client.goto_supplement("s")
+            raise AssertionError("验证码页应抛 CaptchaError")
+        except client.CaptchaError:
+            pass
+    finally:
+        client.detect_page, client.oc.click, client.sleep_rand = saved
+    print("✓ 点击补退选后验证码：CaptchaError（不误分类为 RiskBlockedError）")
+
+
 def main() -> int:
     test_reuses_valid_session_without_login()
     test_session_expired_has_priority_over_supplement_url()
@@ -238,6 +259,7 @@ def main() -> int:
     test_prepare_fetch_context_logs_ready_state()
     test_reused_supplement_page_is_reset_before_walking()
     test_menu_without_table_interactive_is_transitioning()
+    test_goto_supplement_captcha_is_not_risk_blocked()
     print("登录会话复用单元测试通过 ✅")
     return 0
 
